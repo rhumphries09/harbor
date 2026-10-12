@@ -90,12 +90,16 @@ async function main() {
       { id: 'held', title: 'Held batch', status: 'pending', worker_engine: 'claude', depends_on: ['working', 'review', 'quiet'] },
       { id: 'early-1', title: 'Finished batch one', status: 'done', worker_engine: 'claude', started_at: new Date(now - 60 * 60_000).toISOString(), completed_at: new Date(now - 40 * 60_000).toISOString() },
       { id: 'early-2', title: 'Finished batch two', status: 'done', worker_engine: 'codex', started_at: new Date(now - 60 * 60_000).toISOString(), completed_at: new Date(now - 30 * 60_000).toISOString() },
+      // A failed batch, for the red Error group.
+      { id: 'broken', title: 'Failed batch', status: 'failed', worker_engine: 'codex', notes: 'review: tests deleted' },
     ],
   };
   const digest = crypto.createHash('sha1').update(workspace).digest('hex').slice(0, 12);
   fs.writeFileSync(path.join(delegateDir, 'queues', `${digest}.json`), JSON.stringify(queue, null, 2));
   fs.writeFileSync(path.join(delegateDir, 'events', 'drive-orch-run.jsonl'), [
-    { t: new Date(now - 2 * 60_000).toISOString(), msg: 'working active signal' },
+    // Fresh, so a slow boot cannot age the working batch past the 3-minute
+    // working window before the panel is read (it did on 2026-10-12).
+    { t: new Date(now).toISOString(), msg: 'working active signal' },
     { t: new Date(now - 10 * 60_000).toISOString(), msg: 'review worker finished' },
     { t: new Date(now - 45 * 60_000).toISOString(), msg: 'quiet last worker signal' },
   ].map(JSON.stringify).join('\n') + '\n');
@@ -135,7 +139,23 @@ async function main() {
     // Tabs are found by aria-label: inactive view tabs draw no text (views.md).
     await waitFor(cdp, "Boolean(document.querySelector('.view-switch-btn[aria-label=\"Orch\"]'))", 'Orch tab');
     await cdp.eval(`localStorage.setItem('harbor-slate-stage', ${JSON.stringify(JSON.stringify({ tiles: [{ sessionId: SESSION_ID, slot: 0 }], selectedId: SESSION_ID }))}); localStorage.setItem('harbor-view', 'orch'); location.reload()`);
-    await waitFor(cdp, "document.querySelectorAll('.orch-run-batch').length === 7", 'seven overview batches');
+    await waitFor(cdp, "document.querySelectorAll('.orch-run-batch').length === 8", 'eight overview batches');
+    // Grouped by status (Pat, 2026-10-12): running, error, not started, done,
+    // each with its own static dot colour on the heading and on every row.
+    const groups = await cdp.eval(`[...document.querySelectorAll('.orch-run-group')].map((group) => ({
+      head: group.querySelector('.orch-run-group-head').textContent,
+      rows: group.querySelectorAll('.orch-run-batch').length,
+      dot: getComputedStyle(group.querySelector('.orch-run-group-head .orch-run-dot')).backgroundColor,
+      rowDots: [...group.querySelectorAll('.orch-run-batch .orch-run-dot')].map((dot) => getComputedStyle(dot).backgroundColor),
+      animated: [...group.querySelectorAll('.orch-run-dot')].some((dot) => getComputedStyle(dot).animationName !== 'none'),
+    }))`);
+    results.push(`groups: ${groups.map((group) => `${group.head} (${group.rows} rows, ${group.dot})`).join('; ')}`);
+    check(JSON.stringify(groups.map((group) => [group.head, group.rows])) === JSON.stringify([['Running3', 3], ['Error1', 1], ['Not started2', 2], ['Done2', 2]]), 'groups are not Running 3, Error 1, Not started 2, Done 2 in that order');
+    check(new Set(groups.map((group) => group.dot)).size === 4, 'the four groups do not have four different dot colours');
+    check(groups.every((group) => group.rowDots.every((color) => color === group.dot)), 'a row dot does not match its group colour');
+    check(groups.find((group) => group.head.startsWith('Done'))?.dot === 'rgb(126, 201, 122)', 'done is not green');
+    check(groups.find((group) => group.head.startsWith('Error'))?.dot === 'rgb(255, 95, 95)', 'error is not red');
+    check(groups.every((group) => !group.animated), 'a status dot is animated');
     const overview = await cdp.eval("[...document.querySelectorAll('.orch-run-batch')].map((row) => ({ text: row.textContent, quiet: row.classList.contains('quiet') }))");
     const text = overview.map((row) => row.text).join('\n');
     results.push(`overview: ${text}`);
@@ -158,12 +178,12 @@ async function main() {
     await waitFor(cdp, "Boolean(document.querySelector('.orch-pill'))", 'session orchestration pill');
     const pill = await cdp.eval("({ text: document.querySelector('.orch-pill').textContent, title: document.querySelector('.orch-pill').title, quiet: document.querySelector('.orch-pill').classList.contains('quiet') })");
     results.push(`pill: ${pill.text}`);
-    check(/^Orch 2\/7/.test(pill.text), 'pill does not show Orch done/total');
+    check(/^Orch 2\/8/.test(pill.text), 'pill does not show Orch done/total');
     check(pill.text.includes('last signal'), 'pill omits signal age');
     check(pill.title.startsWith(pill.text), 'pill tooltip does not carry the whole clipped line');
     await cdp.shot('2-session-pill');
     await cdp.eval("document.querySelector('.orch-pill').click()");
-    await waitFor(cdp, "Boolean(document.querySelector('.orch-panel') && document.querySelectorAll('.orch-batch-card').length === 7)", 'focused run panel');
+    await waitFor(cdp, "Boolean(document.querySelector('.orch-panel') && document.querySelectorAll('.orch-batch-card').length === 8)", 'focused run panel');
     const panel = await cdp.eval("({ eta: document.querySelector('.orch-eta')?.textContent || '', cards: [...document.querySelectorAll('.orch-batch-card')].map((card) => card.textContent) })");
     results.push(`panel summary: ${panel.eta}`);
     check(panel.eta.includes(RUN_LINE), 'panel summary omits the run counts');

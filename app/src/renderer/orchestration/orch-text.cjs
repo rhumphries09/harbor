@@ -61,4 +61,29 @@ function etaText(summary) {
   return `rough ETA ${eta}${long}`;
 }
 
-module.exports = { waitingText, runCounts, formatEta, etaText };
+// A run's batches grouped by queue status (2026-10-12, Pat: "can i get these
+// grouped by status and a little like green for done, blue for running, and
+// idk like red for error or something? grey for the 'not started' status").
+// Running first, because that is what you watch; errors next, because they
+// need you; then what has not started; done last, since it is the long list.
+// Queue order is kept inside each group, and empty groups are left out. Any
+// status the queue does not define lands in "Not started", never nowhere.
+const BATCH_GROUPS = [
+  { key: 'running', label: 'Running', statuses: ['active'] },
+  { key: 'error', label: 'Error', statuses: ['failed', 'blocked', 'error'] },
+  { key: 'pending', label: 'Not started', statuses: [] },
+  { key: 'done', label: 'Done', statuses: ['done', 'completed', 'success'] },
+];
+
+function batchGroupKey(batch) {
+  const status = String(batch?.status || 'pending').toLowerCase();
+  return (BATCH_GROUPS.find((group) => group.statuses.includes(status)) || BATCH_GROUPS[2]).key;
+}
+
+function groupBatches(batches = []) {
+  return BATCH_GROUPS
+    .map((group) => ({ key: group.key, label: group.label, batches: (batches || []).filter((batch) => batchGroupKey(batch) === group.key) }))
+    .filter((group) => group.batches.length);
+}
+
+module.exports = { waitingText, runCounts, formatEta, etaText, batchGroupKey, groupBatches };

@@ -3,7 +3,7 @@ import { OrchProjectPicker } from './OrchProjectPicker.jsx';
 import { Delegations } from './Delegations.jsx';
 import { SubSessions } from './SubSessions.jsx';
 import { createSingleFlight } from '../../shared/single-flight.js';
-import { etaText, runCounts, waitingText } from './orch-text.cjs';
+import { etaText, groupBatches, runCounts, waitingText } from './orch-text.cjs';
 
 function ageText(ms) {
   if (ms == null) return 'no liveness signal';
@@ -69,16 +69,28 @@ export function OrchLiveRuns({ projects, onPick, focusParentId, onOpenSession })
             </span>
             {run.queue.goal ? <span className="orch-run-goal">{run.queue.goal}</span> : null}
             <span className="orch-run-batches">
-              {run.queue.batches.map((batch) => {
-                const live = run.liveBatches.find((row) => row.batchId === batch.id) || {};
-                return (
-                  <span className={`orch-run-batch ${live.workerState === 'quiet' ? 'quiet' : ''}`} key={batch.id}>
-                    <span>{batch.title || batch.id}</span>
-                    <span>{batch.worker_engine || batch.worker || 'worker not recorded'}</span>
-                    <span title={live.waitingOn?.length ? `waits on ${live.waitingOn.join(', ')}` : undefined}>{stateText(live)}</span>
+              {groupBatches(run.queue.batches).map((group) => (
+                <span className={`orch-run-group ${group.key}`} key={group.key}>
+                  <span className="orch-run-group-head">
+                    <span className={`orch-run-dot ${group.key}`} aria-hidden="true" />
+                    <span>{group.label}</span>
+                    <span className="orch-run-group-count">{group.batches.length}</span>
                   </span>
-                );
-              })}
+                  {group.batches.map((batch) => {
+                    const live = run.liveBatches.find((row) => row.batchId === batch.id) || {};
+                    return (
+                      <span className={`orch-run-batch ${live.workerState === 'quiet' ? 'quiet' : ''}`} key={batch.id}>
+                        <span className="orch-run-batch-title">
+                          <span className={`orch-run-dot ${group.key}`} aria-hidden="true" />
+                          <span>{batch.title || batch.id}</span>
+                        </span>
+                        <span>{batch.worker_engine || batch.worker || 'worker not recorded'}</span>
+                        <span title={live.waitingOn?.length ? `waits on ${live.waitingOn.join(', ')}` : undefined}>{stateText(live)}</span>
+                      </span>
+                    );
+                  })}
+                </span>
+              ))}
             </span>
             {runCounts(run.summary) ? <span className="orch-run-eta">{runCounts(run.summary)}</span> : null}
             {etaText(run.summary) ? <span className="orch-run-eta">{etaText(run.summary)}</span> : null}

@@ -2073,6 +2073,22 @@ button { font-family: inherit; }
 .orch-run-batches { display: grid; gap: 6px; }
 .orch-run-batch { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(110px, auto) minmax(190px, auto); gap: 12px; padding: 8px 10px; border-radius: 8px; background: rgba(255,255,255,.025); color: var(--sub); font-size: 11px; }
 .orch-run-batch.quiet { box-shadow: inset 3px 0 #d69a37; color: #f1bd62; background: rgba(214,154,55,.08); }
+/* A run's batches grouped by status (2026-10-12, Pat: "green for done, blue for
+   running ... red for error ... grey for the 'not started' status"). The dots
+   are static status lights: no pulse, no transition (the no-animations rule).
+   Running is the accent blue because blue already means "working" everywhere
+   in Harbor; done and error reuse the Orch panel's own green and red. */
+.orch-run-group { display: grid; gap: 6px; }
+.orch-run-group + .orch-run-group { margin-top: 8px; }
+.orch-run-group-head { display: flex; align-items: center; gap: 8px; padding: 0 2px; color: var(--sub); font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.orch-run-group-count { color: var(--muted); font-weight: 500; letter-spacing: 0; }
+.orch-run-batch-title { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.orch-run-dot { width: 7px; height: 7px; flex: 0 0 7px; margin-top: 4px; border-radius: 50%; background: var(--muted); }
+.orch-run-group-head .orch-run-dot { margin-top: 0; }
+.orch-run-dot.running { background: var(--ac); }
+.orch-run-dot.error { background: #ff5f5f; }
+.orch-run-dot.pending { background: var(--muted); }
+.orch-run-dot.done { background: #7ec97a; }
 .orch-run-eta { color: var(--muted); font-size: 11px; }
 .orch-overview-kickoff { margin-top: 34px; padding-top: 20px; border-top: 1px solid var(--border); }
 .orch-overview-kickoff h3 { margin: 0 0 14px; font-size: 13px; }
@@ -5311,7 +5327,8 @@ button { font-family: inherit; }
 }
 
 .orch-batch-card.orch-status-pending { border-left-color: var(--muted); }
-.orch-batch-card.orch-status-active  { border-left-color: #d97757; }
+/* Running is the accent blue here too, as in the overview's groups (2026-10-12). */
+.orch-batch-card.orch-status-active  { border-left-color: var(--ac); }
 .orch-batch-card.orch-status-done    { border-left-color: #7ec97a; }
 .orch-batch-card.orch-status-blocked { border-left-color: #e0a94a; }
 .orch-batch-card.orch-status-error   { border-left-color: #ff5f5f; }
@@ -5331,7 +5348,7 @@ button { font-family: inherit; }
 }
 
 .orch-status-dot.orch-status-pending { background: var(--muted); }
-.orch-status-dot.orch-status-active  { background: #d97757; }
+.orch-status-dot.orch-status-active  { background: var(--ac); }
 .orch-status-dot.orch-status-done    { background: #7ec97a; }
 .orch-status-dot.orch-status-blocked { background: #e0a94a; }
 .orch-status-dot.orch-status-error   { background: #ff5f5f; }

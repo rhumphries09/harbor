@@ -3,7 +3,23 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { etaText, runCounts, waitingText } = require('../../src/renderer/orchestration/orch-text.cjs');
+const { etaText, groupBatches, runCounts, waitingText } = require('../../src/renderer/orchestration/orch-text.cjs');
+
+test('batches group as running, error, not started, then done, keeping queue order', () => {
+  const batches = [
+    { id: 'd1', status: 'done' }, { id: 'r1', status: 'active' }, { id: 'p1', status: 'pending' },
+    { id: 'e1', status: 'failed' }, { id: 'd2', status: 'completed' }, { id: 'r2', status: 'ACTIVE' },
+    { id: 'e2', status: 'blocked' }, { id: 'x', status: 'something-new' }, { id: 'n' },
+  ];
+  assert.deepEqual(groupBatches(batches).map((group) => [group.key, group.label, group.batches.map((batch) => batch.id)]), [
+    ['running', 'Running', ['r1', 'r2']],
+    ['error', 'Error', ['e1', 'e2']],
+    ['pending', 'Not started', ['p1', 'x', 'n']],
+    ['done', 'Done', ['d1', 'd2']],
+  ]);
+  assert.deepEqual(groupBatches([{ id: 'only', status: 'done' }]).map((group) => group.key), ['done']);
+  assert.deepEqual(groupBatches([]), []);
+});
 
 test('a waiting batch names two of its blockers, then a count', () => {
   assert.equal(waitingText(['r1-table-play']), 'waits on r1-table-play');

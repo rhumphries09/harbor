@@ -3,12 +3,17 @@ import { projectRootSessionId } from '../../shared/sidebar-model.js';
 import { folderLabel } from '../folder-label.cjs';
 import { etaText, runCounts, waitingText } from './orch-text.cjs';
 
+// `failed` is what the delegate CLI actually writes for a rejected batch; it
+// used to fall through to the grey pending dot. completed/success are done.
 const STATUS_COLORS = {
   pending: 'orch-status-pending',
   active: 'orch-status-active',
   done: 'orch-status-done',
+  completed: 'orch-status-done',
+  success: 'orch-status-done',
   blocked: 'orch-status-blocked',
   error: 'orch-status-error',
+  failed: 'orch-status-error',
 };
 
 function StatusDot({ status }) {
