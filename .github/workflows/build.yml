@@ -88,7 +88,11 @@ jobs:
       # app/package.json's "pack:daemon-deps"/"dist:*" scripts.
       - run: npm run ${{ matrix.script }}
 
+      # Manual runs only. A tag run attaches the same files to the release
+      # below, so uploading them as artifacts too only stored a second copy
+      # (about 850 MB for the three platforms, measured 2026-10-12).
       - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         with:
           name: harbor-${{ matrix.name }}
           if-no-files-found: warn

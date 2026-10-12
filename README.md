@@ -97,10 +97,11 @@ See [the backlog](docs/BACKLOG.md) for limits and follow-up work.
 
 ### Download a build
 
-A `v*` tag builds native installers and attaches them to a **draft** release.
-A maintainer must publish that draft. Check [the releases page](https://github.com/tpgiv1995/harbor/releases);
-if no published build is available, use the source instructions below.
-Manual workflow dispatch uploads build artifacts without publishing a release.
+Installers for Windows (`.exe`), macOS (`.dmg`) and Linux (`.AppImage`, `.deb`)
+are on [the releases page](https://github.com/tpgiv1995/harbor/releases). Each
+`v*` tag builds them and attaches them to a draft release, which a maintainer
+publishes once the files are checked. Manual workflow dispatch builds the same
+files as run artifacts without publishing anything.
 
 The installers are unsigned. Windows SmartScreen and macOS Gatekeeper may warn.
 Review the source and release provenance before deciding to run an unsigned

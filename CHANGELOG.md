@@ -2,8 +2,39 @@
 
 ## Unreleased
 
-The package version remains 0.1.0. These notes describe the current source tree,
-not a claim that installers or a public release have been published.
+Nothing yet.
+
+## 0.1.0 (2026-10-12)
+
+The first packaged release. Windows, macOS and Linux installers are attached to
+the GitHub release, built by `.github/workflows/build.yml` from the `v0.1.0` tag.
+They are not code-signed, so the OS warns before running them; the release page
+says how to get past that. The Windows installer was unpacked and launched in an
+isolated profile before release (it opened, started its own session daemon and
+rendered every view, `app/scripts/drive-release-win.js`); the macOS and Linux
+installers were built by CI and have not been launched on real hardware.
+
+Changes since the notes below were written:
+
+- Typing stays responsive with a large session history. The rail used to resend
+  every session ever recorded about once a second; it now sends only what
+  changed (about 5.9 MB a second down to about 1 KB in a measured case).
+- Sessions that tools start on their own (codex reviews and exec runs, headless
+  Claude workers, orchestration batches) live in the Orch view instead of the
+  rail. A helper resumed into a live window still behaves like a normal session.
+- The phone app reconnects at once when you come back to it, keeps the last
+  session list on screen while it does, and its header shows the session's
+  context use, whether it is working or waiting, and its model.
+- On Windows each Harbor session's processes are held to 32 GB of committed
+  memory apiece (a Job Object limit, configurable), so one runaway test cannot
+  exhaust the machine.
+- Orchestration shows what could start: a pending batch reads "ready, not
+  started" or names what it waits on, batches are grouped Running, Error, Not
+  started and Done with a colored dot, and the ETA schedules the dependency graph
+  at the run's real width instead of assuming one batch at a time. The shipped
+  `/orchestrate` commands plan runs for parallel execution.
+
+From the earlier unreleased notes:
 
 - A message whose Enter Claude swallowed is submitted instead of left in the
   composer (2026-09-23). A busy Claude CLI can read the typed text and the Enter
@@ -59,5 +90,3 @@ not a claim that installers or a public release have been published.
   SVG's exact provenance remains unresolved.
 
 Known limits and deferred fixes are in [the backlog](docs/BACKLOG.md).
-Hosted CI status, installer behavior and release publication must be checked
-separately; they are not implied by these notes.
