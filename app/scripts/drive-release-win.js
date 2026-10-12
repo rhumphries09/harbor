@@ -26,8 +26,36 @@ const path = require('node:path');
 
 const APP = path.resolve(process.argv[2] || '');
 const EXE = path.join(APP, 'Harbor.exe');
-const PORT = 9342;
 const OUT = path.join(os.tmpdir(), 'harbor-drive-release');
+
+// A free port for this run. A fixed one made the second run of the night
+// attach to whatever already held it (its own app could not bind and said so
+// in app.log) and hang there.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = require('node:net').createServer();
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+// Every process running from the unpacked folder: the app, its helpers, and
+// the session daemon, which the app starts DETACHED on purpose (a real install
+// keeps its sessions across app restarts), so killing the app's tree leaves it
+// running. The folder is a throwaway extraction, so nothing else lives there.
+function stopEverythingFrom(folder) {
+  const script = `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('${folder.replace(/'/g, "''")}', [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.ProcessId }`;
+  const pids = execSync(`powershell -NoProfile -Command "${script.replace(/"/g, '\\"')}"`, { encoding: 'utf8' })
+    .split(/\s+/).filter(Boolean);
+  for (const pid of pids) {
+    try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' }); } catch {}
+  }
+  return pids.length;
+}
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -53,7 +81,11 @@ class Cdp {
     });
   }
   async eval(expression) {
-    const response = await this.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+    // Bounded: a renderer that hangs or crashes must fail the check, not hang it.
+    const response = await Promise.race([
+      this.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('page did not answer within 15s')), 15000)),
+    ]);
     if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || 'page evaluation failed');
     return response.result.value;
   }
@@ -74,11 +106,16 @@ async function waitFor(cdp, expression, label, timeoutMs = 60000) {
 
 async function main() {
   if (!fs.existsSync(EXE)) throw new Error(`no Harbor.exe in ${APP}`);
+  const leftovers = stopEverythingFrom(APP);
+  if (leftovers) console.log(`stopped ${leftovers} process(es) left running from ${APP} by an earlier run`);
+  const PORT = await freePort();
   fs.rmSync(OUT, { recursive: true, force: true });
   fs.mkdirSync(OUT, { recursive: true });
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-release-drive-'));
   const userData = path.join(tmp, 'userData');
   fs.mkdirSync(userData, { recursive: true });
+  // An empty transcript store, as any machine with Claude Code installed has.
+  fs.mkdirSync(path.join(tmp, 'projects'), { recursive: true });
   // A minimal finished setup so the window opens on the app, not the wizard.
   fs.writeFileSync(path.join(userData, 'config.json'), JSON.stringify({
     setup: { completed: true, completedAt: new Date().toISOString(), appVersion: 'release-drive' },
@@ -148,6 +185,9 @@ async function main() {
   } finally {
     await sleep(500);
     try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {}
+    await sleep(1000);
+    const remaining = stopEverythingFrom(APP);
+    results.push(`stopped afterwards: the app tree plus ${remaining} detached process(es) (the session daemon)`);
   }
   const verdict = failures.length ? `FAIL\n${failures.join('\n')}` : 'PASS';
   const report = `${verdict}\n\n${results.join('\n')}\nscreenshots and app log: ${OUT}\n`;
