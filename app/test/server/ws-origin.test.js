@@ -43,7 +43,7 @@ const { parseOrigin, isSelfOrigin, originAllowed } = require('../../src/server/t
 
 function stubs(dir) {
   return {
-    sidebar: { emitter: new EventEmitter(), async start() {}, close() {}, getState: () => ({ model: ['real-state'] }) },
+    sidebar: { emitter: new EventEmitter(), async start() {}, close() {}, getState: () => ({ model: { projects: [{ label: 'real-state', sessions: [{ id: 'real-state', isLive: true }] }] } }) },
     artifacts: { async list() { return { ok: true, artifacts: [] }; }, isServable() { return false; } },
     icons: { async list() { return { dir, icons: {} }; }, watch() {}, async filePathFor() { return null; }, mimeFor() { return null; } },
     tasks: { read: async () => ({}), mutate: async () => ({}), subscribe() {}, close() {} },
@@ -166,7 +166,7 @@ test('a real websocket handshake carrying the SERVER\'S OWN Origin opens and can
   const result = await attempt(url, { headers: { origin: `http://127.0.0.1:${address.port}` } });
   assert.equal(result.opened, true, `the server's own origin must open a connection, got: ${result.error?.message}`);
   const response = await call(result.ws, 'sidebar:get-state');
-  assert.deepEqual(response.result, { model: ['real-state'] });
+  assert.deepEqual(response.result.model.projects, [{ label: 'real-state', sessions: [{ id: 'real-state', isLive: true }], sessionCount: 1 }]);
   result.ws.close();
 });
 
@@ -189,7 +189,7 @@ test('a real websocket handshake carrying NO Origin header opens and can call a 
   const result = await attempt(url);
   assert.equal(result.opened, true, `an absent Origin header must still connect, got: ${result.error?.message}`);
   const response = await call(result.ws, 'sidebar:get-state');
-  assert.deepEqual(response.result, { model: ['real-state'] });
+  assert.deepEqual(response.result.model.projects, [{ label: 'real-state', sessions: [{ id: 'real-state', isLive: true }], sessionCount: 1 }]);
   result.ws.close();
 });
 
@@ -214,7 +214,7 @@ test('a handshake carrying the discovered MagicDNS-style origin opens, on a port
   const result = await attempt(url, { headers: { origin: 'https://pat-desktop.tailnet-name.ts.net' } });
   assert.equal(result.opened, true, `the discovered MagicDNS origin must open, got: ${result.error?.message}`);
   const response = await call(result.ws, 'sidebar:get-state');
-  assert.deepEqual(response.result, { model: ['real-state'] });
+  assert.deepEqual(response.result.model.projects, [{ label: 'real-state', sessions: [{ id: 'real-state', isLive: true }], sessionCount: 1 }]);
   result.ws.close();
 
   // Two-sided again: a DIFFERENT tailnet node's name, even though it also
@@ -255,6 +255,6 @@ test('MagicDNS origin heals after startup when discovery later returns a name', 
   const after = await attempt(url, magicOrigin);
   assert.equal(after.opened, true, `MagicDNS Origin must open after discovery heals, got: ${after.error?.message}`);
   const response = await call(after.ws, 'sidebar:get-state');
-  assert.deepEqual(response.result, { model: ['real-state'] });
+  assert.deepEqual(response.result.model.projects, [{ label: 'real-state', sessions: [{ id: 'real-state', isLive: true }], sessionCount: 1 }]);
   after.ws.close();
 });

@@ -182,6 +182,24 @@ test('incremental scanner preserves prefix work, split UTF-8 and truncation; wor
   fs.writeFileSync(file, JSON.stringify({ type: 'user', message: { content: 'new' } }) + '\n');
   assert.equal(bg.backgroundSnapshot((await scan(file)).state).outstanding.length, 0);
 });
+test('idle evidence scans retain history in the worker and push only changed links', async (t) => {
+  const { EventEmitter } = require('node:events'); const sent = [];
+  class FakeWorker extends EventEmitter {
+    unref() {} terminate() {}
+    postMessage(message) { sent.push(structuredClone(message)); setImmediate(() => this.emit('message', { parents: [], built: {} })); }
+  }
+  const index = createDelegationIndex({}, { WorkerClass: FakeWorker }); t.after(() => index.close());
+  const rows = Array.from({ length: 10000 }, (_, i) => ({ id: `sample-${i}`, title: 'Synthetic session', meta: { firstPrompt: 'x'.repeat(1200) } }));
+  await index.scan(rows, ['sample-1']);
+  assert.equal(sent[0].rows.length, 10000); assert.equal(sent[0].rows[0].meta, undefined);
+  index.updateLinks({ 'sample-2': 'sample-1' });
+  await index.scan(rows, ['sample-1']);
+  assert.equal(sent[1].rows, undefined); assert.deepEqual(sent[1].linkUpdates, { 'sample-2': 'sample-1' });
+  assert.ok(Buffer.byteLength(JSON.stringify(sent[1])) < 1000);
+  await index.scan(rows, []); assert.deepEqual(sent[2].linkUpdates, {});
+  await index.scan([...rows], []); assert.equal(sent[3].rows.length, 10000, 'a history refresh replaces the worker snapshot');
+});
+
 test('run states and attention agree on blocked, working, background, ready and dead', () => {
   const session = { isLive: true, background: { outstanding: [{ kind: 'agent', description: 'Review', startedMs: 1000 }] } };
   assert.equal(runStateCue(session, null, { blocked: true }).kind, 'blocked');

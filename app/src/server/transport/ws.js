@@ -75,8 +75,10 @@ function mergePayloads(channel, previous, incoming) {
   const merged = {
     ...a,
     ...b,
-    append: [...a.append, ...b.append],
-    changed: [...(a.changed || []), ...(b.changed || [])],
+    append: [...a.append.map((block) => (b.changed || []).find((updated) => updated.key && updated.key === block.key) || block), ...b.append]
+      .filter((block) => !(b.removed || []).includes(block.key)),
+    changed: [...(a.changed || []), ...(b.changed || [])].filter((block) => !(b.removed || []).includes(block.key)),
+    ...((a.removed?.length || b.removed?.length) ? { removed: [...new Set([...(a.removed || []), ...(b.removed || [])])] } : {}),
   };
   return { ...incoming, args: [merged, ...incoming.args.slice(1)] };
 }

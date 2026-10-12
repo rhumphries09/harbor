@@ -11,7 +11,8 @@ const { SessionClient } = require('../../src/daemon/client.js');
 const {
   resolveJobPolicy, parseByteLimit, jobName, createSessionJob, openSessionJob,
   assignPid, queryJob, terminateJob, closeJob, armKillOnClose,
-  JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_JOB_MEMORY,
+  JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+  DEFAULT_PROCESS_MEMORY_MAX,
 } = require('../../src/daemon/win-job.js');
 
 const winTest = (name, fn) => test(name, { skip: process.platform !== 'win32' && 'Windows Job Objects are win32-only' }, fn);
@@ -58,6 +59,14 @@ test('1. policy is default-on only for the real Windows store; relocated stores 
   if (process.platform === 'win32') assert.equal(policy('policy').enabled, true);
   assert.equal(parseByteLimit('12G'), 12 * 1024 ** 3);
   assert.equal(parseByteLimit('bogus'), null);
+  if (process.platform === 'win32') {
+    assert.equal(policy('policy').processMemoryMax, DEFAULT_PROCESS_MEMORY_MAX, 'the per-process ceiling is ON by default');
+    const named = (value) => resolveJobPolicy({ ...process.env, HARBOR_SESSIOND_DIR: 'C:\\tmp\\x', HARBOR_SESSIOND_JOB_NAMESPACE: 'p', HARBOR_SESSIOND_PROCESS_MEMORY_MAX: value }, 'win32').processMemoryMax;
+    assert.equal(named('48G'), 48 * 1024 ** 3);
+    assert.equal(named('off'), null);
+    assert.equal(named('0'), null);
+    assert.equal(named('nonsense'), DEFAULT_PROCESS_MEMORY_MAX, 'a typo keeps the safe default, never no ceiling');
+  }
 });
 
 winTest('2. containment includes a child born after assignment and accounting is monotonic', async (t) => {
@@ -155,13 +164,17 @@ winTest('6. a real sessiond session contains its pty grandchild and health repor
   }
   assert.ok(client, 'isolated daemon did not answer');
   const health = await client.request('health');
-  assert.deepEqual(health.jobs, { enabled: true, sessions: 0 });
+  assert.deepEqual(health.jobs, { enabled: true, sessions: 0, processMemoryMax: DEFAULT_PROCESS_MEMORY_MAX }, 'health reports the effective per-process ceiling');
   const childCode = "const{spawn}=require('node:child_process');spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:true,env:process.env,stdio:'ignore'});setInterval(()=>{},1000)";
   const session = await client.request('spawn', { argv: [guiNodeExec, '-e', childCode], cwd: root, env, cols: 80, rows: 24 });
   job = openSessionJob(session.id, resolveJobPolicy(env));
   await sleep(300);
   const info = queryJob(job);
   assert.ok(info.activeProcesses >= 4, `expected keeper, ConPTY, pty and grandchild; got ${info.pids.join(',')}`);
+  // The keeper applied the default per-process commit ceiling (2026-10-11).
+  assert.ok(info.limitFlags & JOB_OBJECT_LIMIT_PROCESS_MEMORY, 'a real session has no per-process ceiling');
+  assert.equal(info.processMemoryLimitBytes, DEFAULT_PROCESS_MEMORY_MAX);
+  assert.equal(info.limitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY, 0, 'the job-wide limit stays opt-in');
   assert.equal((await client.request('health')).jobs.sessions, 1);
   await client.request('terminate', { id: session.id, signal: 'SIGKILL' }).catch(() => {});
   assert.equal(await gone(info.pids.at(-1)), true, 'real session grandchild survived job termination');
@@ -221,6 +234,105 @@ winTest('7. a dormant ending with jobs ON persists the honest exit record BEFORE
   assert.equal(exit.dormant, true, `dormant flag lost: ${JSON.stringify(exit)}`);
   assert.match(exit.reason || '', /win-job spec 7/);
   assert.equal(await gone(before.pids.at(-1), 8000), true, 'MCP grandchild survived the ending');
+});
+
+// The 2026-10-11 runaway: one agent-launched script committed 107 GB. Two-sided:
+// inside a session job a process asking for more than the per-process ceiling
+// is refused while a small sibling in the SAME job is untouched, and the same
+// request outside any job succeeds, so the refusal is the ceiling's doing.
+// A child that announces itself, waits for `go` on stdin (sent only AFTER the
+// parent has assigned it to the job), then allocates and reports. No timing
+// guess decides whether the allocation ran inside the job (Astra review).
+// One stdout parser per child, complete lines only (a message split across
+// chunks is never matched half-read), cleanup registered at spawn so a child
+// that never answers is killed with the test, and every waiter settles: line,
+// spawn error, exit or 15 s timeout (Astra round 2).
+function allocator(t, bytes) {
+  const code = `process.stdout.write('ready\\n');process.stdin.once('data',()=>{try{const b=Buffer.alloc(${bytes});b.fill(1);process.stdout.write('ok\\n')}catch(e){process.stdout.write('denied '+e.constructor.name+': '+e.message+'\\n')}setTimeout(()=>process.exit(0),200)})`;
+  const proc = spawn(guiNodeExec, ['-e', code], { windowsHide: true, env: process.env, stdio: ['pipe', 'pipe', 'ignore'] });
+  t.after(async () => {
+    if (proc.exitCode === null && proc.signalCode === null) {
+      try { proc.kill(); } catch {}
+      await Promise.race([new Promise((resolve) => proc.once('exit', resolve)), sleep(3000)]);
+    }
+  });
+  const lines = [];
+  let partial = '';
+  let exited = false;
+  let spawnError = null;
+  const waiters = new Set();
+  const notify = () => { for (const waiter of [...waiters]) waiter(); };
+  proc.on('error', (error) => { spawnError = error; notify(); });
+  proc.stdout.on('data', (chunk) => {
+    partial += chunk;
+    const parts = partial.split('\n');
+    partial = parts.pop();
+    for (const line of parts) lines.push(line.trim());
+    notify();
+  });
+  proc.once('exit', () => { exited = true; notify(); });
+  const waitFor = (pattern) => new Promise((resolve, reject) => {
+    let timer = null;
+    const done = () => { clearTimeout(timer); waiters.delete(check); };
+    function check() {
+      const line = lines.find((l) => pattern.test(l));
+      if (line !== undefined) { done(); resolve(line); return; }
+      if (spawnError) { done(); reject(spawnError); return; }
+      if (exited) { done(); reject(new Error(`allocator ${proc.pid} exited without printing ${pattern}; lines ${JSON.stringify(lines)}`)); }
+    }
+    timer = setTimeout(() => { done(); reject(new Error(`allocator ${proc.pid} never printed ${pattern} within 15 s; lines ${JSON.stringify(lines)}`)); }, 15000);
+    waiters.add(check);
+    check();
+  });
+  return { proc, ready: waitFor(/^ready$/), go: () => proc.stdin.write('go\n'), answer: () => waitFor(/^(ok|denied .+)$/) };
+}
+
+winTest('9. the per-process ceiling refuses only the process that crosses it', async (t) => {
+  const MB = 1024 * 1024;
+  const p = { ...policy('ceiling'), processMemoryMax: 256 * MB };
+  const job = createSessionJob('ceiling', p);
+  t.after(() => { try { terminateJob(job); } catch {} closeJob(job); });
+  armKillOnClose(job, p);
+  const limits = queryJob(job);
+  assert.ok(limits.limitFlags & JOB_OBJECT_LIMIT_PROCESS_MEMORY);
+  assert.equal(limits.processMemoryLimitBytes, 256 * MB);
+
+  const runaway = allocator(t, 512 * MB);
+  const sibling = allocator(t, 64 * MB);
+  await Promise.all([runaway.ready, sibling.ready]);
+  assignPid(job, runaway.proc.pid);
+  assignPid(job, sibling.proc.pid);
+  assert.ok(queryJob(job).pids.includes(runaway.proc.pid), 'the runaway was not in the job before it allocated');
+  runaway.go();
+  assert.match(await runaway.answer(), /^denied RangeError: .*allocation failed/i, 'a 512 MB request under a 256 MB ceiling was not refused by an allocation failure');
+  // The sibling allocates AFTER the denial: a refusal that hit the whole job
+  // would fail it too.
+  sibling.go();
+  assert.equal(await sibling.answer(), 'ok', 'a small sibling in the same job was refused too');
+
+  const outside = allocator(t, 512 * MB);
+  await outside.ready;
+  outside.go();
+  assert.equal(await outside.answer(), 'ok', 'the same request outside any job must succeed, or the refusal proves nothing');
+});
+
+winTest('10. a keeper arming a job an older daemon created without the ceiling adds it', () => {
+  // The live daemon predates the ceiling; only the keeper (a fresh process per
+  // session) runs the new code. This is that lane, at the unit boundary.
+  const capped = policy('old-daemon');
+  const oldDaemonPolicy = { ...capped, processMemoryMax: null };
+  const job = createSessionJob('old-daemon', oldDaemonPolicy);
+  try {
+    assert.equal(queryJob(job).limitFlags & JOB_OBJECT_LIMIT_PROCESS_MEMORY, 0, 'the old-daemon job must start without the ceiling');
+    armKillOnClose(job, capped);
+    const armed = queryJob(job);
+    assert.ok(armed.limitFlags & JOB_OBJECT_LIMIT_PROCESS_MEMORY, 'the keeper arm did not add the ceiling');
+    assert.equal(armed.processMemoryLimitBytes, DEFAULT_PROCESS_MEMORY_MAX);
+    assert.ok(armed.limitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE);
+  } finally {
+    try { terminateJob(job); } catch {}
+    closeJob(job);
+  }
 });
 
 winTest('8. the daemon creates the job UNARMED and the keeper arm preserves the memory limit (f8 M1)', () => {

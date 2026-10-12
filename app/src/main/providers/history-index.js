@@ -9,6 +9,8 @@ const { projectLabelForCwd } = require('../../shared/project-label.cjs');
 
 const { readClaudeTitles } = require('./native-session-titles.cjs');
 
+// Entry fields are additive. Keep the envelope readable by the older phone
+// server sharing this cache; upgrade missing fields after the window opens.
 const CACHE_VERSION = 2;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/;
 const UUID_BARE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
@@ -141,6 +143,7 @@ function readTail(file, size, window) {
 }
 
 function parseTranscript(file, previous) {
+  let entrypoint = null;
   let cwd = null;
   let start = null;
   let summary = null;
@@ -149,6 +152,7 @@ function parseTranscript(file, previous) {
   scanHeadLines(file, (line) => {
     const obj = jsonObject(line);
     if (!obj) return false;
+    if (entrypoint === null && typeof obj.entrypoint === 'string') entrypoint = obj.entrypoint;
     if (cwd === null && obj.cwd) cwd = obj.cwd;
     if (start === null && obj.timestamp) start = obj.timestamp;
     if (summary === null && obj.type === 'summary' && obj.summary) summary = obj.summary;
@@ -200,6 +204,7 @@ function parseTranscript(file, previous) {
   const title = native.native_title || native.native_summary || summary || firstPrompt || commandName;
   return {
     cwd,
+    entrypoint,
     start,
     last,
     ...native,
@@ -280,7 +285,11 @@ function createHistoryIndex(options = {}) {
 
   let titlesMemo = null;
   let homeMapMemo = null;
+  let titlesCheckedAt = -Infinity;
+  let homesCheckedAt = -Infinity;
   function loadGeneratedTitles() {
+    if (titlesMemo && nowMs() - titlesCheckedAt < refreshFloorMs) return titlesMemo.titles;
+    titlesCheckedAt = nowMs();
     const stamp = inputStamp(titlesFile);
     if (titlesMemo && titlesMemo.stamp === stamp) return titlesMemo.titles;
     let titles = {};
@@ -316,7 +325,7 @@ function createHistoryIndex(options = {}) {
     options.onDiskCacheRead?.();
     try {
       const data = JSON.parse(fsImpl.readFileSync(cacheFile, 'utf8'));
-      if (data.v === CACHE_VERSION && data.files && typeof data.files === 'object') return data.files;
+      if ([2, 3].includes(data.v) && data.files && typeof data.files === 'object') return (memFiles = data.files);
     } catch { /* an absent or invalid cache is empty */ }
     return {};
   }
@@ -444,6 +453,26 @@ function createHistoryIndex(options = {}) {
     return parseTimestamp(entry.last) || new Date(entry.mt * 1000);
   }
 
+  function migrateEntries(limit = 32) {
+    const files = loadCache(); let changed = 0; let remaining = 0;
+    for (const [file, entry] of Object.entries(files)) {
+      if (Object.hasOwn(entry, 'entrypoint')) continue;
+      if (changed >= limit) { remaining++; continue; }
+      let entrypoint = null; let cwd = null; let start = null; let prompt = null;
+      try {
+        scanHeadLines(file, (line) => {
+          const row = jsonObject(line); if (!row) return false;
+          entrypoint ||= typeof row.entrypoint === 'string' ? row.entrypoint : null;
+          cwd ||= row.cwd; start ||= row.timestamp; prompt ||= extractUserText(row);
+          return Boolean(entrypoint || cwd && start && prompt);
+        });
+        entry.entrypoint = entrypoint; changed++;
+      } catch { entry.entrypoint = null; changed++; }
+    }
+    if (changed && !remaining) { try { saveCache(files); } catch (error) { log(String(error)); } }
+    return { changed, remaining };
+  }
+
   function flagValue(args, flag) {
     const index = args.indexOf(flag);
     if (index + 1 >= args.length || args[index + 1].startsWith('--')) throw new Error(`harbor-index: ${flag} requires a value`);
@@ -494,17 +523,25 @@ function createHistoryIndex(options = {}) {
       let title = entry.title;
       if (!title && !showAll) continue;
       if (!title) title = '(no user messages)';
-      rows.push([last, entry.id, label, title, entry.first_prompt, entry.cwd, file]);
+      rows.push([last, entry.id, label, title, entry.first_prompt, entry.cwd, file, entry.entrypoint, entry]);
     }
     rows.sort((a, b) => b[0] - a[0]);
     const withFirstPrompt = args.includes('--with-first-prompt');
     const withCwd = args.includes('--with-cwd');
-    const out = rows.map(([last, id, label, title, firstPrompt, cwd, file]) => {
+    const out = rows.map(([last, id, label, title, firstPrompt, cwd, file, entrypoint, entry]) => {
+      if (args.includes('--with-meta')) {
+        // Metadata uses the same columns, escaped losslessly. No second copy
+        // of the prompt/title/path and no JSON parser per row on main.
+        return [id, formatDate(last), label, entry.title || '', firstPrompt || '', cwd || '', file,
+          entrypoint || '', entry.start || '', entry.mt ? entry.mt * 1000 : '', entry.title == null ? '0' : '1']
+          .map((value) => String(value).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n').replace(/\r/g, '\\r')).join('\t');
+      }
       const shownLabel = withFirstPrompt ? label : padCodePoints(codePointSlice(label, PROJECT_LABEL_WIDTH), PROJECT_LABEL_WIDTH);
       let line = `${id}\t${formatDate(last)}\t${shownLabel}\t${title}`;
       if (withFirstPrompt) line += `\t${codePointSlice(String(firstPrompt || '').replace(/[\t\n]/g, ' '), 300)}`;
       if (withCwd) line += `\t${String(cwd || '').replace(/[\t\n]/g, ' ')}`;
       if (args.includes('--with-path')) line += `\t${file}`;
+      if (args.includes('--with-entrypoint')) line += `\t${entrypoint || ''}`;
       return line;
     });
     return out.length ? `${out.join('\n')}\n` : '';
@@ -541,6 +578,10 @@ function createHistoryIndex(options = {}) {
   }
 
   function buildHomeMap() {
+    // Metadata bursts share the refresh floor. Fresh attribution is checked
+    // at most once per floor, never once per Orch candidate or send lookup.
+    if (homeMapMemo && nowMs() - homesCheckedAt < refreshFloorMs) return homeMapMemo.map;
+    homesCheckedAt = nowMs();
     // With no configured profiles, the homes are DISCOVERED from the machine
     // rather than assumed. This used to be a literal three-entry list ending in
     // a `.claude-<person's-name>` directory nobody else owns, which meant an
@@ -611,10 +652,19 @@ function createHistoryIndex(options = {}) {
     return out.length ? `${out.join('\n')}\n` : '';
   }
 
+  let lookupSource = null;
+  let entriesById = new Map();
   function findEntry(index, id) {
-    const matches = Object.entries(index).filter(([, entry]) => entry.id === id);
-    if (!matches.length) return [null, null];
-    return matches.reduce((best, candidate) => candidate[1].mt > best[1].mt ? candidate : best);
+    if (lookupSource !== index) {
+      entriesById = new Map();
+      for (const candidate of Object.entries(index)) {
+        const previous = entriesById.get(candidate[1].id);
+        if (!previous || candidate[1].mt > previous[1].mt) entriesById.set(candidate[1].id, candidate);
+      }
+      lookupSource = index;
+      options.onLookupBuild?.();
+    }
+    return entriesById.get(id) || [null, null];
   }
 
   function meta(id, env) {
@@ -627,7 +677,7 @@ function createHistoryIndex(options = {}) {
     if (!entry) throw new Error(`harbor-index: session ${id} not found`);
     return `${JSON.stringify({ id, cwd: entry.cwd, project: projectLabel(entry.cwd), title: entry.title,
       firstPrompt: entry.first_prompt || null, start: entry.start || null, mt: entry.mt ? entry.mt * 1000 : null,
-      path: file, home: buildHomeMap()[id] || null })}\n`;
+      path: file, entrypoint: entry.entrypoint || null, home: buildHomeMap()[id] || null })}\n`;
   }
 
   function humanSize(value) {
@@ -665,7 +715,7 @@ function createHistoryIndex(options = {}) {
     throw new Error('harbor-index: invalid command');
   }
 
-  return { run, refreshIndex, buildHomeMap, parseTranscript, projectLabel };
+  return { run, refreshIndex, buildHomeMap, parseTranscript, projectLabel, migrateEntries };
 }
 
 function createHistoryIndexWorker(options = {}) {
@@ -736,6 +786,7 @@ function createHistoryIndexWorker(options = {}) {
   return {
     run: (argv, env = {}) => request('run', [argv, env]),
     buildHomeMap: () => request('buildHomeMap'),
+    migrateEntries: (limit) => request('migrateEntries', [limit]),
     close: async () => {
       if (closed) return;
       closed = true;
@@ -764,6 +815,8 @@ if (!isMainThread && workerData && workerData.historyIndexWorker) {
         result = index.run(argv, { ...process.env, ...env });
       } else if (message.method === 'buildHomeMap') {
         result = index.buildHomeMap();
+      } else if (message.method === 'migrateEntries') {
+        result = index.migrateEntries(...message.args);
       } else {
         throw new Error(`unknown history index worker method: ${message.method}`);
       }

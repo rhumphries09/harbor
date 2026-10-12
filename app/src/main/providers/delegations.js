@@ -93,6 +93,12 @@ function dispatchFor(task, parentCwd, depth = 0) {
 }
 function linkDispatches(parents, providerRows) {
   const roots = providerRows.filter((r) => r.provider === 'codex' && r.lineage?.kind === 'exec' && !r.lineage.parentThreadId);
+  const rootsByCwd = new Map();
+  for (const row of roots) {
+    const key = canonicalCwd(row.cwd);
+    if (!rootsByCwd.has(key)) rootsByCwd.set(key, []);
+    rootsByCwd.get(key).push(row);
+  }
   const byId = new Map(providerRows.map((r) => [r.id, r]));
   const claimed = new Map(); const dispatches = [];
   for (const parent of parents) for (const task of parent.background?.tasks || []) {
@@ -115,7 +121,7 @@ function linkDispatches(parents, providerRows) {
       }
       continue;
     }
-    const matches = roots.filter((r) => !claimed.has(r.id) && (!exactOwners.has(r.id) || exactOwners.get(r.id) === d.parentId) && canonicalCwd(r.cwd) === canonicalCwd(d.cwd)
+    const matches = (rootsByCwd.get(canonicalCwd(d.cwd)) || []).filter((r) => !claimed.has(r.id) && (!exactOwners.has(r.id) || exactOwners.get(r.id) === d.parentId)
       && r.lineage.startedMs >= d.startedMs && r.lineage.startedMs - d.startedMs <= FRESH_WINDOW_MS
       && (!d.endedMs || r.lineage.startedMs <= d.endedMs))
       .sort((a, b) => a.lineage.startedMs - b.lineage.startedMs);
@@ -250,21 +256,28 @@ function delegationSummaries(groups, now = Date.now(), liveIds = null) {
 
 // One worker and one coalesced flight, triggered by the bridge's existing
 // watchers. No new polling, no process-table reads, no per-row meta requests.
-function createDelegationIndex(ownerOptions = {}, { cacheFile = null } = {}) {
+function createDelegationIndex(ownerOptions = {}, { cacheFile = null, WorkerClass = Worker } = {}) {
   let worker = null; let pending = null; let closed = false;
+  let sentRows = null; let linkUpdates = {};
   const scan = createSingleFlight((rows, liveIds) => new Promise((resolve, reject) => {
     if (closed) return resolve({ parents: [], providers: [] });
     if (!worker) {
-      worker = new Worker(path.join(__dirname, 'delegations-worker.js'));
+      worker = new WorkerClass(path.join(__dirname, 'delegations-worker.js'));
+      sentRows = null;
       worker.unref();
       worker.on('message', (message) => { const p = pending; pending = null; message.error ? p?.reject(new Error(message.error)) : p?.resolve(message); });
       worker.on('error', (error) => { pending?.reject(error); pending = null; worker = null; });
     }
     pending = { resolve, reject };
-    worker.postMessage({ rows: latestRows, liveIds: latestLiveIds, ownerOptions, cacheFile });
+    // History changes on a history refresh, not on an agent going idle. Keep
+    // its metadata in the worker and send only live ids and new exact links.
+    const rows = sentRows === latestRows ? undefined : latestRows.map(({ meta, background, ownerEvidence, delegationSummary, ...row }) => row);
+    worker.postMessage({ rows, linkUpdates, liveIds: latestLiveIds, ownerOptions, cacheFile });
+    sentRows = latestRows; linkUpdates = {};
   }));
   let latestRows = []; let latestLiveIds = [];
   return { scan(rows, liveIds = []) { latestRows = rows; latestLiveIds = liveIds; return scan(); },
+    updateLinks(updates) { Object.assign(linkUpdates, updates); },
     close() { closed = true; pending?.resolve({ parents: [], providers: [] }); pending = null; worker?.terminate(); worker = null; } };
 }
 module.exports = { RECENT_WINDOW_MS, FRESH_WINDOW_MS, RECENT_DONE_MS, QUIET_MS, canonicalCwd, shellWords, dispatchFor, linkDispatches, agentState, buildDelegationGroups, ageDelegationGroups, delegationSummaries, createDelegationIndex, mergeDelegationLinks };

@@ -13,9 +13,9 @@ function sessionLiveOwned(session, pane, header, now = Date.now()) {
   if (alive != null) return alive;
   return Boolean(evidence.lastWriteMs && now - evidence.lastWriteMs < 3 * 60 * 1000);
 }
-function backgroundBusy(session, header, pane) {
+function backgroundBusy(session, header, pane, now = Date.now()) {
   const background = session?.background;
-  return Boolean(sessionLiveOwned(session, pane, header) && background
+  return Boolean(sessionLiveOwned(session, pane, header, now) && background
     && (background.outstanding?.length || background.awaitingFinal));
 }
 function runStateCue(session = {}, pane, header, now = Date.now()) {
@@ -26,7 +26,7 @@ function runStateCue(session = {}, pane, header, now = Date.now()) {
     const verb = header?.workingText || header?.text || 'Working';
     return { kind: 'running', label: verb, ariaLabel: `running: ${verb}` };
   }
-  if (alive && backgroundBusy(session, header, pane)) {
+  if (alive && backgroundBusy(session, header, pane, now)) {
     const tasks = session.background.outstanding || [];
     const agents = tasks.filter((t) => t.delegated || t.kind === 'agent').length;
     const label = agents ? `waiting on ${agents} agent${agents === 1 ? '' : 's'}`

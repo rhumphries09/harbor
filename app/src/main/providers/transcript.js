@@ -1484,16 +1484,13 @@ function createTranscriptProvider(options = {}) {
       if (entry.needsReplace) {
         entry.needsReplace = false;
         emitUpdate(entry, { replace: blocks });
-      } else if (before && [...keysBefore].some((key) => !currentKeys.has(key))) {
-        // The bounded window slid. Image retention can evict a non-front row,
-        // so replace wholesale whenever any previously rendered key vanished.
-        emitUpdate(entry, { replace: blocks });
       } else {
         // Appended rows are the ones minted this read (seq is monotonic);
         // changed rows are earlier action rows whose tool result just landed.
         const appended = blocks.filter((b) => Number(b.key.slice(1)) >= seqBefore);
         const changed = blocks.filter((b) => changedKeys.has(b.key) && Number(b.key.slice(1)) < seqBefore);
-        emitUpdate(entry, { append: appended, changed });
+        const removed = [...keysBefore].filter((key) => !currentKeys.has(key));
+        emitUpdate(entry, { append: appended, changed, ...(removed.length ? { removed } : {}) });
       }
     } catch (error) {
       try { await handle?.close(); } catch { /* already closed */ }

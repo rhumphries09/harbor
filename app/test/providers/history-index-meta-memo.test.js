@@ -23,6 +23,26 @@ const { createHistoryIndex } = require('../../src/main/providers/history-index.j
 
 const SESSION_A = '11111111-2222-3333-4444-555555555555';
 
+test('entrypoint is indexed from early records without changing the compatible cache schema', () => {
+  const fixture = makeFixture();
+  try {
+    const file = path.join(fixture.projectsDir, 'C--dev-thing', `${SESSION_A}.jsonl`);
+    fs.writeFileSync(file, JSON.stringify({ type: 'system', entrypoint: 'sdk-cli' }) + '\n' + record('first prompt'));
+    fs.writeFileSync(path.join(fixture.cacheDir, 'index.json'), JSON.stringify({ v: 2, files: { [file]: { id: SESSION_A, title: 'stale cache' } } }));
+    const index = createHistoryIndex(fixture);
+    const emitted = index.run(['emit', '--all', '--with-first-prompt', '--with-cwd', '--with-path', '--with-entrypoint']);
+    assert.equal(emitted.trimEnd().split('\t').at(-1), 'sdk-cli');
+    const meta = JSON.parse(index.run(['meta', SESSION_A]));
+    assert.equal(meta.entrypoint, 'sdk-cli');
+    const bulk = require('../../src/main/providers/history.js').parseEmitTsv(index.run(['emit', '--all', '--with-first-prompt', '--with-cwd', '--with-path', '--with-entrypoint', '--with-meta']))[0].meta;
+    const { home, ...withoutHome } = meta;
+    assert.deepEqual(bulk, withoutHome, 'bulk metadata matches the individual lookup exactly');
+    const cached = JSON.parse(fs.readFileSync(path.join(fixture.cacheDir, 'index.json')));
+    assert.equal(cached.v, 2);
+    assert.equal(cached.files[file].entrypoint, 'sdk-cli');
+  } finally { fs.rmSync(fixture.tmp, { recursive: true, force: true }); }
+});
+
 function record(text, cwd = 'C:\\dev\\thing') {
   return `${JSON.stringify({
     type: 'user', timestamp: new Date().toISOString(), cwd,
@@ -69,6 +89,30 @@ function countFsCalls(run) {
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 15));
+
+test('metadata lookup indexes once and stats are bounded per refresh, not per call', () => {
+  const fixture = makeFixture();
+  let now = 0; let stats = 0; let builds = 0;
+  const index = createHistoryIndex({ ...fixture, now: () => now, refreshFloorMs: 10000,
+    fs: { ...fs, statSync: (...args) => { stats++; return fs.statSync(...args); } },
+    onLookupBuild: () => { builds++; } });
+  try {
+    index.refreshIndex(); index.run(['meta', SESSION_A]);
+    stats = 0;
+    for (let i = 0; i < 10000; i++) index.run(['meta', SESSION_A]);
+    assert.equal(stats, 0, 'warm metadata is memory-only');
+    assert.equal(builds, 1, 'one id index for the resident file map');
+    fs.writeFileSync(fixture.titlesFile, JSON.stringify({ titles: { [SESSION_A]: 'New title after refresh floor' } }));
+    now = 10001;
+    assert.equal(JSON.parse(index.run(['meta', SESSION_A])).title, 'New title after refresh floor');
+    const refreshedStats = stats;
+    assert.ok(refreshedStats > 0 && refreshedStats < 20);
+    for (let i = 0; i < 1000; i++) index.run(['meta', SESSION_A]);
+    assert.equal(stats, refreshedStats);
+    index.refreshIndex(); index.run(['meta', SESSION_A]);
+    assert.equal(builds, 2, 'a new index pass rebuilds the id lookup');
+  } finally { fs.rmSync(fixture.tmp, { recursive: true, force: true }); }
+});
 
 test('repeated meta calls neither re-list the homes nor re-read the titles file', () => {
   const { projectsDir, cacheDir, homes, profiles, titlesFile } = makeFixture();

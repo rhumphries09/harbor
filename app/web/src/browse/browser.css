@@ -332,3 +332,9 @@
   font-weight: 600;
 }
 
+
+.browser-note {
+  margin: 4px 16px 10px;
+  color: var(--fnt);
+  font-size: 12px;
+}

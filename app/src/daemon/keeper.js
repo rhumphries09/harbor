@@ -56,7 +56,11 @@ let sessionJob = null;
 if (sessionJobPolicy.enabled) {
   try {
     sessionJob = openSessionJob(config.id, sessionJobPolicy);
-    if (sessionJob) armKillOnClose(sessionJob);
+    // Arming also sets the per-process commit ceiling (win-job.js, 2026-10-11).
+    if (sessionJob) armKillOnClose(sessionJob, sessionJobPolicy);
+    // A session with no job runs without the ceiling; say so instead of
+    // silently advertising protection it does not have (Astra review, 2026-10-11).
+    else { try { process.stderr.write(`session job ${config.id} could not be opened; this session runs without kill-on-close or the per-process memory ceiling\n`); } catch {} }
   } catch (error) { try { process.stderr.write(`session job open failed (continuing): ${error.message}\n`); } catch {} }
 }
 

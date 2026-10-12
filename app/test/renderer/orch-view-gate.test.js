@@ -77,21 +77,22 @@ test('delegation pill navigation obeys the same optional Orch gate', () => {
   assert.match(indexSource, /focusParentId=\{delegationFocus\}/);
 });
 
-test('forty sidebar pushes do not repeat queue scans and delegation requests coalesce', async () => {
+test('Orch polls independently of sidebar pushes and coalesces repeated refreshes', async () => {
   const vm = require('node:vm'); const esbuild = require('esbuild');
-  const effects = []; let push; let queueCalls = 0; let delegationCalls = 0; let release;
+  const effects = []; let poll; let subscriptions = 0; let queueCalls = 0; let delegationCalls = 0; let release;
   const mod = { exports: {} };
   const source = read('src/renderer/orchestration/OrchLiveRuns.jsx');
   const react = { createElement: () => null, useEffect: (fn) => effects.push(fn), useState: (initial) => [initial, () => {}] };
-  const harbor = { orchestration: { listRuns: async () => { queueCalls++; return []; }, listDelegations: () => { delegationCalls++; return new Promise((resolve) => { release = resolve; }); } }, sidebar: { onUpdate: (fn) => { push = fn; return () => {}; } } };
+  const harbor = { orchestration: { listRuns: async () => { queueCalls++; return []; }, listDelegations: () => { delegationCalls++; return new Promise((resolve) => { release = resolve; }); } }, sidebar: { onUpdate: () => { subscriptions++; return () => {}; } } };
   vm.runInNewContext(esbuild.transformSync(source, { format: 'cjs', loader: 'jsx' }).code, {
-    module: mod, exports: mod.exports, window: { harbor }, setInterval: () => 1, clearInterval() {},
+    module: mod, exports: mod.exports, window: { harbor }, setInterval: (fn) => { poll = fn; return 1; }, clearInterval() {},
     require: (id) => id === 'react' ? react : id.includes('single-flight') ? require('../../src/shared/single-flight.cjs') : {},
   });
   mod.exports.OrchLiveRuns({ projects: [] }); const cleanup = effects[0]();
-  for (let i = 0; i < 40; i++) push();
+  assert.equal(subscriptions, 0);
+  for (let i = 0; i < 40; i++) poll();
   assert.equal(queueCalls, 1); assert.equal(delegationCalls, 1);
   release([]); await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(queueCalls, 1); assert.equal(delegationCalls, 2);
+  assert.equal(queueCalls, 2); assert.equal(delegationCalls, 2);
   release([]); cleanup();
 });

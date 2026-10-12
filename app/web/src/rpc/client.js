@@ -114,8 +114,25 @@ function wsUrlFromHttp(serverUrl, token) {
   return base.toString();
 }
 
-export function createRpcClient({ serverUrl, token, onPush, onConnectionChange }) {
+// RETURNING TO THE APP MUST NOT FEEL LIKE A RELOAD (Pat, 2026-10-11: "if i
+// leave the app for like 5 seconds and return to it (without closing the app)
+// it reloads and takes a while"). iOS closes a backgrounded web app's socket
+// (the server log is a wall of 1006 closes), and this client then waited a
+// FIXED 4 s before even trying again, on a return that the page itself can
+// see happening. Now: the page coming back (visibilitychange to visible,
+// pageshow, focus, online) reconnects at once; a socket that still SAYS open
+// after a suspend is proven with one small round trip and replaced if it does
+// not answer within PROBE_MS; and a genuinely failing link backs off
+// 250 ms, 1 s, 2 s, then 4 s, instead of 4 s from the first miss.
+const RECONNECT_STEPS_MS = [250, 1000, 2000, 4000];
+const PROBE_MS = 2500;
+const WAKE_DEBOUNCE_MS = 400;
+
+export function createRpcClient({ serverUrl, token, onPush, onConnectionChange, lifecycle = null }) {
   let ws = null;
+  let failedAttempts = 0;
+  let lastWakeAt = 0;
+  let detachLifecycle = null;
   let nextId = 1;
   const pending = new Map();
   let state = CONNECTION.disconnected;
@@ -166,19 +183,27 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange }
   function connect() {
     manualClose = false;
     connectCount += 1;
+    attachLifecycle();
     if (!serverUrl) {
       setState(CONNECTION.error, 'server URL is required');
       return;
     }
     setState(CONNECTION.connecting);
+    let socket;
     try {
-      ws = new WebSocket(wsUrlFromHttp(serverUrl, token));
+      socket = new WebSocket(wsUrlFromHttp(serverUrl, token));
+      ws = socket;
     } catch (error) {
       setState(CONNECTION.error, String(error.message || error));
       scheduleReconnect();
       return;
     }
-    ws.onopen = () => setState(CONNECTION.connected);
+    const current = () => ws === socket;
+    socket.onopen = () => {
+      if (!current()) return;
+      failedAttempts = 0;
+      setState(CONNECTION.connected);
+    };
     // onerror never carries a real reason (the WebSocket spec deliberately
     // hides it from the error event for security), and onclose fires right
     // after onerror for every failed connection, so onerror's message was
@@ -186,7 +211,11 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange }
     // before React ever painted it. The CloseEvent itself DOES carry a code
     // and (for a same-origin close) a reason, so onclose is the one place
     // that can report anything specific; onerror is left as a no-op signal.
-    ws.onclose = (event) => {
+    socket.onclose = (event) => {
+      // A socket this client already replaced (a failed wake probe) closes
+      // late; it must not tear down its successor.
+      if (!current()) return;
+      ws = null;
       const code = event?.code;
       const reason = event?.reason || CLOSE_CODE_HINTS[code] || `code ${code ?? 'unknown'}`;
       // Before the state change, so anything reacting to `disconnected` sees a
@@ -195,8 +224,9 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange }
       if (!manualClose) setState(CONNECTION.disconnected, reason);
       scheduleReconnect();
     };
-    ws.onerror = () => {};
-    ws.onmessage = (event) => {
+    socket.onerror = () => {};
+    socket.onmessage = (event) => {
+      if (!current()) return;
       let message;
       try {
         message = JSON.parse(event.data);
@@ -223,6 +253,8 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange }
     manualClose = true;
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+    detachLifecycle?.();
+    detachLifecycle = null;
     failPending('disconnected');
     ws?.close();
     ws = null;
@@ -231,10 +263,79 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange }
 
   function scheduleReconnect() {
     if (manualClose || reconnectTimer) return;
+    const delay = RECONNECT_STEPS_MS[Math.min(failedAttempts, RECONNECT_STEPS_MS.length - 1)];
+    failedAttempts += 1;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connect();
-    }, 4000);
+    }, delay);
+  }
+
+  // Abandon a socket that cannot be trusted (no answer to the wake probe) and
+  // start a fresh one now, without waiting for its close event, which on a
+  // dead link can take a TCP timeout to arrive.
+  function replaceSocket(reason) {
+    const stale = ws;
+    ws = null;
+    if (stale) {
+      stale.onopen = stale.onmessage = stale.onerror = stale.onclose = null;
+      try { stale.close(4000, reason); } catch { /* already gone */ }
+    }
+    failPending(`the connection dropped before the server answered (${reason})`);
+    setState(CONNECTION.disconnected, reason);
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    failedAttempts = 0;
+    connect();
+  }
+
+  // The page came back (or the network did). Reconnect now instead of waiting
+  // out a backoff step that was scheduled while the app was in the background;
+  // and if the socket claims to be open, make it prove it.
+  function wake() {
+    if (manualClose) return;
+    const at = Date.now();
+    if (at - lastWakeAt < WAKE_DEBOUNCE_MS) return;
+    lastWakeAt = at;
+    const OPEN = globalThis.WebSocket?.OPEN ?? 1;
+    const CONNECTING = globalThis.WebSocket?.CONNECTING ?? 0;
+    if (!ws || (ws.readyState !== OPEN && ws.readyState !== CONNECTING)) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      failedAttempts = 0;
+      connect();
+      return;
+    }
+    if (ws.readyState !== OPEN) return;
+    const probed = ws;
+    let answered = false;
+    const timer = setTimeout(() => {
+      if (!answered && ws === probed) replaceSocket('no answer after the app came back');
+    }, PROBE_MS);
+    // Any reply proves the round trip, an error reply included.
+    const settle = () => { answered = true; clearTimeout(timer); };
+    call('daemon:get-banner').then(settle, (error) => {
+      if (/not connected|connection dropped/.test(String(error?.message))) return;
+      settle();
+    });
+  }
+
+  function attachLifecycle() {
+    if (detachLifecycle) return;
+    const win = lifecycle?.window ?? (typeof window !== 'undefined' ? window : null);
+    const doc = lifecycle?.document ?? (typeof document !== 'undefined' ? document : null);
+    if (!win && !doc) return;
+    const onVisible = () => { if (!doc || doc.visibilityState !== 'hidden') wake(); };
+    doc?.addEventListener?.('visibilitychange', onVisible);
+    win?.addEventListener?.('pageshow', wake);
+    win?.addEventListener?.('focus', onVisible);
+    win?.addEventListener?.('online', wake);
+    detachLifecycle = () => {
+      doc?.removeEventListener?.('visibilitychange', onVisible);
+      win?.removeEventListener?.('pageshow', wake);
+      win?.removeEventListener?.('focus', onVisible);
+      win?.removeEventListener?.('online', wake);
+    };
   }
 
   function call(method, payload) {
@@ -284,5 +385,6 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange }
     getState: () => state,
     getLastError: () => lastError,
     getConnectCount: () => connectCount,
+    wake,
   };
 }

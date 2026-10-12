@@ -1,3 +1,5 @@
+import { subSessionReadOnly } from '../../shared/sub-sessions.js';
+import { useSidebarState } from './store.js';
 import { runStateCue } from '../../shared/session-run-state.cjs';
 import React, {
   useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState,
@@ -138,6 +140,69 @@ function VirtualList({ rows, renderRow }) {
     </div>
   );
 }
+
+const SessionRailRow = React.memo(function SessionRailRow({ session, clock, profiles, grouping, isOpen, isSelected, isArchived, attentionState, copied, onOpen, onContextMenu, archiveSession, unarchiveSession }) {
+      const provider = providerIdentity(session.provider);
+      const disabled = session.isWindowsEra;
+      const isChild = subSessionReadOnly(session);
+      const runState = runStateCue(session, undefined, undefined, clock);
+      const displayTitle = isChild && session.childTitle ? session.childTitle : session.title;
+      const status = railStatus({ runState, attention: attentionState, dormant: session.dormant });
+      return (
+        <div
+          className={`sr-wrap${isArchived ? ' archived' : ''}`}
+          onContextMenu={(event) => onContextMenu(event, session)}
+        >
+          <button
+            type="button"
+            className={`sr${session.isLive ? ' live' : ''}${isOpen ? ' open' : ''}${isSelected ? ' sel' : ''}${disabled ? ' disabled' : ''}${isChild ? ' child' : ''}`}
+            data-session-id={session.id}
+            onClick={() => { if (!disabled) { onOpen(session); } }}
+            title={disabled
+              ? 'Session from a previous machine: its folder does not exist on this one'
+              : isChild
+                ? 'Orchestration worker. Click to open read-only. Right-click for options.'
+                : `${displayTitle || 'Session'}\nClick to open. Right-click for options.`}
+            disabled={disabled}
+          >
+            {/* The row's ONE status light (rail-status.cjs): run state, an
+                answer owed, an unseen finish, asleep, or not running. */}
+            <span className={`sr-d ${status.kind}`} data-status={status.kind} title={status.detail ? `${status.label}\n${status.detail}` : status.label} aria-label={status.label} />
+            <img className="sr-provider" src={provider.logo} alt="" aria-hidden="true" />
+            <span className="sr-copy">
+              <span className="sr-t">
+                {copied ? 'Resume command copied' : displayTitle}
+              </span>
+              {session.model && session.model !== 'default' ? <span className="sr-project">{session.model}</span> : null}
+              {grouping === 'date' ? <span className="sr-project">{homeLabel(session.project)}</span> : null}
+            </span>
+            <span className="sr-tm">{formatRelative(session.lastActive, new Date(Math.floor(clock / 60000) * 60000))}</span>
+            <AccountBadge home={session.home} profiles={profiles} />
+            {/* The tag names the ERA the label carries ('win:' or 'linux:'),
+                not a hardcoded 'win:': a linux-era row wearing a win: tag
+                would misstate which machine it came from. */}
+            {session.isWindowsEra ? (
+              <span className="sidebar-win-tag">
+                {String(session.project).trim().toLowerCase().startsWith('linux:') ? 'linux:' : 'win:'}
+              </span>
+            ) : null}
+          </button>
+          <button
+            type="button"
+            className="sr-x"
+            data-session-id={session.id}
+            title={isArchived ? 'Unarchive (show in rail again)' : 'Archive (hide from rail)'}
+            aria-label={isArchived ? 'Unarchive session' : 'Archive session'}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (isArchived) unarchiveSession(session.id); else archiveSession(session.id);
+            }}
+          >
+            {isArchived ? '↩' : '×'}
+          </button>
+        </div>
+      );
+    });
 
 function AccountBadge({ home, profiles }) {
   return <ProfileBadge profileId={normalizeHome(home, profiles)} profiles={profiles} className="sr-b" />;
@@ -360,10 +425,18 @@ function FilterChip({ label, active, onClick, dataFilter }) {
 // session as a window on the stage (read instantly; resume happens later, from
 // the command bar, only when Pat actually sends something).
 export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSession, openSessionIds, selectedSessionId, attention, searchRef, view, onViewChange, orchEnabled = true, taskAlert = 0 }) {
+  const [clock, setClock] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setClock(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, []);
   const { profiles, loaded: profilesLoaded } = useProfiles();
   const [railState, setRailState] = useState(() => restoreRailState(3));
-  const [model, setModel] = useState({ projects: [], liveProjects: [] });
-  const [indexerSessionCount, setIndexerSessionCount] = useState(0);
+  const sharedState = useSidebarState();
+  const [testModel, setTestModel] = useState(null);
+  const model = testModel || sharedState.model;
+  const indexerSessionCount = sharedState.indexerSessionCount || 0;
+  const railSessionCount = sharedState.historyCount || 0;
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState({ kind: 'rolling', days: 2 });
   const [customSince, setCustomSince] = useState('');
@@ -485,42 +558,12 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
     }
   }, [hidden]);
 
-  // The rail renders from THIS component's model, not the app-level copy, so
-  // harness fabrications need their own hook here; pinned so real pushes do
-  // not clobber a test model mid-scenario. E2E-gated: absent in production.
-  const pinnedTestModelRef = useRef(false);
   useEffect(() => {
-    let active = true;
-    const load = async () => {
-      const state = await window.harbor.sidebar.getState();
-      if (!active || pinnedTestModelRef.current) return;
-      setModel(state.model);
-      setIndexerSessionCount(state.indexerSessionCount || 0);
-      window.__harborSidebarStats = {
-        indexerSessionCount: state.indexerSessionCount || 0,
-      };
-    };
-    load();
-    const unsubscribe = window.harbor.sidebar.onUpdate((state) => {
-      if (pinnedTestModelRef.current) return;
-      setModel(state.model);
-      setIndexerSessionCount(state.indexerSessionCount || 0);
-      window.__harborSidebarStats = {
-        indexerSessionCount: state.indexerSessionCount || 0,
-      };
-    });
-    if (window.harbor?.e2e) {
-      window.__setRailModelForTest = (next) => {
-        pinnedTestModelRef.current = next != null;
-        if (next != null) setModel(next);
-        else load();
-      };
-    }
-    return () => {
-      active = false;
-      unsubscribe();
-      delete window.__setRailModelForTest;
-    };
+    window.__harborSidebarStats = { indexerSessionCount };
+  }, [indexerSessionCount]);
+  useEffect(() => {
+    if (window.harbor?.e2e) window.__setRailModelForTest = setTestModel;
+    return () => { delete window.__setRailModelForTest; };
   }, []);
 
   useEffect(() => {
@@ -559,6 +602,7 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
     if (!showArchived && archived.size === 0) return model;
     return {
       ...model,
+      grouping: null,
       projects: (model.projects || []).map((project) => ({
         ...project,
         sessions: (project.sessions || []).filter((session) => archived.has(session.id) === showArchived),
@@ -714,13 +758,14 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
     ))
   );
 
-  const handleSessionContextMenu = (event, session) => {
+  const handleSessionContextMenu = useCallback((event, session) => {
     // Right-click opens a small options menu (copy resume command, archive,
     // delete). Rendered through a portal to document.body because a
     // backdrop-filter ancestor traps fixed-position descendants.
     event.preventDefault();
     setMenu({ session, x: event.clientX, y: event.clientY });
-  };
+  }, []);
+  const openRailSession = useCallback((session) => { setQuery(''); onOpenSession(session); }, [onOpenSession]);
 
   // Any click, scroll, or Escape dismisses the context menu.
   useEffect(() => {
@@ -759,7 +804,7 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
       // the dead-session anchor here hid the chip from all-live projects.
       const canOrch = !project.isDateGroup && !project.isWindowsEra
         && sidebarModel.projectRootSessionId(project) && onOpenOrch;
-      const liveCount = project.sessions.filter((s) => s.isLive && !s.isChildTask && !s.delegatedBy).length;
+      const liveCount = project.sessions.filter((s) => s.isLive && !subSessionReadOnly(s)).length;
       const projectAttention = project.sessions.reduce((totals, s) => {
         const state = attention?.get?.(s.id);
         if (state === 'blocked') return { ...totals, blocked: totals.blocked + 1, total: totals.total + 1 };
@@ -829,73 +874,11 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
       );
     }
 
-    if (row.kind === 'session') {
-      const { session } = row;
-      const provider = providerIdentity(session.provider);
-      const disabled = session.isWindowsEra;
-      const isChild = session.isChildTask || session.delegatedBy;
-      const runState = runStateCue(session);
-      const displayTitle = isChild && session.childTitle ? session.childTitle : session.title;
-      const isOpen = openSessionIds?.has(session.id);
-      const isSelected = selectedSessionId === session.id;
-      const isArchived = archived.has(session.id);
-      const attentionState = attention?.get?.(session.id) || null;
-      const status = railStatus({ runState, attention: attentionState, dormant: session.dormant });
-      return (
-        <div
-          className={`sr-wrap${isArchived ? ' archived' : ''}`}
-          onContextMenu={(event) => handleSessionContextMenu(event, session)}
-        >
-          <button
-            type="button"
-            className={`sr${session.isLive ? ' live' : ''}${isOpen ? ' open' : ''}${isSelected ? ' sel' : ''}${disabled ? ' disabled' : ''}${isChild ? ' child' : ''}`}
-            data-session-id={session.id}
-            onClick={() => { if (!disabled) { setQuery(''); onOpenSession(session); } }}
-            title={disabled
-              ? 'Session from a previous machine: its folder does not exist on this one'
-              : isChild
-                ? 'Orchestration worker. Click to open read-only. Right-click for options.'
-                : `${displayTitle || 'Session'}\nClick to open. Right-click for options.`}
-            disabled={disabled}
-          >
-            {/* The row's ONE status light (rail-status.cjs): run state, an
-                answer owed, an unseen finish, asleep, or not running. */}
-            <span className={`sr-d ${status.kind}`} data-status={status.kind} title={status.detail ? `${status.label}\n${status.detail}` : status.label} aria-label={status.label} />
-            <img className="sr-provider" src={provider.logo} alt="" aria-hidden="true" />
-            <span className="sr-copy">
-              <span className="sr-t">
-                {copiedSessionId === session.id ? 'Resume command copied' : displayTitle}
-              </span>
-              {session.model && session.model !== 'default' ? <span className="sr-project">{session.model}</span> : null}
-              {grouping === 'date' ? <span className="sr-project">{homeLabel(session.project)}</span> : null}
-            </span>
-            <span className="sr-tm">{formatRelative(session.lastActive)}</span>
-            <AccountBadge home={session.home} profiles={profiles} />
-            {/* The tag names the ERA the label carries ('win:' or 'linux:'),
-                not a hardcoded 'win:': a linux-era row wearing a win: tag
-                would misstate which machine it came from. */}
-            {session.isWindowsEra ? (
-              <span className="sidebar-win-tag">
-                {String(session.project).trim().toLowerCase().startsWith('linux:') ? 'linux:' : 'win:'}
-              </span>
-            ) : null}
-          </button>
-          <button
-            type="button"
-            className="sr-x"
-            data-session-id={session.id}
-            title={isArchived ? 'Unarchive (show in rail again)' : 'Archive (hide from rail)'}
-            aria-label={isArchived ? 'Unarchive session' : 'Archive session'}
-            onClick={(event) => {
-              event.stopPropagation();
-              if (isArchived) unarchiveSession(session.id); else archiveSession(session.id);
-            }}
-          >
-            {isArchived ? '↩' : '×'}
-          </button>
-        </div>
-      );
-    }
+    if (row.kind === 'session') return <SessionRailRow session={row.session} clock={clock} profiles={profiles} grouping={grouping}
+      isOpen={openSessionIds?.has(row.session.id)} isSelected={selectedSessionId === row.session.id}
+      isArchived={archived.has(row.session.id)} attentionState={attention?.get?.(row.session.id) || null}
+      copied={copiedSessionId === row.session.id} onOpen={openRailSession} onContextMenu={handleSessionContextMenu}
+      archiveSession={archiveSession} unarchiveSession={unarchiveSession} />;
 
     if (row.kind === 'older') {
       return (
@@ -958,8 +941,8 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
             the same set the Archive pill counts, so the two cannot disagree. */}
         <span className="rail-count">
           {narrowing || filteredSessionIds.length > 0
-            ? `${filteredSessionIds.length}/${indexerSessionCount}`
-            : indexerSessionCount}
+            ? `${filteredSessionIds.length}/${railSessionCount}`
+            : railSessionCount}
         </span>
         <div className="rail-head-actions">
           {profiles.length > 0 ? (

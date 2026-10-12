@@ -142,8 +142,8 @@ function codexLineage(payload = {}) {
   return {
     rootId: payload.session_id || payload.id || null,
     parentThreadId: payload.parent_thread_id || spawn?.parent_thread_id || null,
-    kind: other === 'guardian' || payload.thread_source === 'guardian_review' ? 'guardian'
-      : spawn ? 'subagent' : other ? `subagent.${other}` : typeof payload.source === 'string' ? payload.source : 'unknown',
+    kind: payload.source?.subagent === 'other' || payload.source?.subagent === 'guardian' || other === 'guardian' || payload.thread_source === 'guardian_review' ? 'guardian'
+      : spawn ? 'subagent' : other ? `subagent.${other}` : payload.source?.subagent ? 'subagent' : typeof payload.source === 'string' ? payload.source : 'unknown',
     nickname: payload.agent_nickname || spawn?.agent_nickname || null,
     agentPath: payload.agent_path || spawn?.agent_path || null,
     role: payload.agent_role || spawn?.agent_role || null,

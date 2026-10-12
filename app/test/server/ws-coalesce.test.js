@@ -35,6 +35,27 @@ const { ClientQueue, coalesceKey } = require('../../src/server/transport/ws.js')
 
 const push = (channel, args) => ({ type: 'push', channel, args });
 
+test('mobile coalescing preserves transcript evictions without resending images', () => {
+  const { applyTranscriptUpdate } = require('../../src/shared/transcript-blocks.cjs');
+  const queue = new ClientQueue();
+  const image = { key: 'image', images: [{ dataUri: 'synthetic-image' }] };
+  const initial = [image, { key: 'old', text: 'old' }];
+  const deltas = [
+    { sessionId: 'sample', append: [{ key: 'a', text: 'a' }], removed: ['old'] },
+    { sessionId: 'sample', append: [{ key: 'b', text: 'b' }], removed: ['a'] },
+    { sessionId: 'sample', append: [], changed: [{ key: 'b', text: 'finished' }] },
+  ];
+  for (const delta of deltas) {
+    const payload = push('transcript:update', [delta]);
+    queue.enqueue('transcript:update', payload, coalesceKey('transcript:update', payload.args));
+  }
+  assert.equal(queue.length, 1);
+  const combined = JSON.parse(queue.items[0].text).args[0];
+  const actual = applyTranscriptUpdate(initial, combined);
+  assert.deepEqual(actual, deltas.reduce(applyTranscriptUpdate, initial));
+  assert.equal(actual[0], image);
+});
+
 test('a burst of transcript snapshots for one session costs ONE queue slot', () => {
   const queue = new ClientQueue({ limit: 256, maxBytes: 8 * 1024 * 1024 });
   const channel = 'transcript:update';

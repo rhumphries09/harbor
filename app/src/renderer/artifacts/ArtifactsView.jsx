@@ -238,7 +238,7 @@ export function ArtifactsView({ sessionsById }) {
 
   const plan = useMemo(() => {
     const entries = artifacts.map((artifact) => {
-      const session = sessionsById?.get?.(artifact.sessionId) || null;
+      const session = sessionsById?.get?.(artifact.sessionId) || { title: artifact.sessionTitle, project: artifact.sessionProject };
       // Orchestration debris folds into one group here for the same reason it
       // does on the rail: this view groups by project "exactly like the rail
       // groups sessions", so it shares the rail's rule.
@@ -261,6 +261,7 @@ export function ArtifactsView({ sessionsById }) {
     : null;
   const openProjectLabel = openMeta?.artifact
     ? (sessionsById?.get?.(openMeta.artifact.sessionId)?.project
+      || openMeta.artifact.sessionProject
       || folderLeaf(openMeta.artifact.cwd)
       || 'unknown project')
     : null;

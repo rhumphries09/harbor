@@ -6,10 +6,13 @@ const { createControlClient } = require('./session-daemon/factory.js');
 const { createHistoryProvider } = require('./providers/history.js');
 const { createProviderHistory } = require('./providers/provider-history.js');
 const { createProviderSessionLinker } = require('./providers/provider-session-link.js');
-const { mergeSidebarModel } = require('../shared/sidebar-model.cjs');
+const { mergeSidebarModel, sleptSince } = require('../shared/sidebar-model.cjs');
+const { parseLocalDateTime } = require('../shared/date-roll.cjs');
 const { freshWorking } = require('../shared/claude-turn-state.cjs');
 const { createDelegationIndex, buildDelegationGroups, ageDelegationGroups, delegationSummaries, mergeDelegationLinks } = require('./providers/delegations.js');
 const { createSingleFlight } = require('./single-flight.js');
+const { createSidebarPublisher } = require('../shared/sidebar-sync.cjs');
+const { isSubSession, subSessionReadOnly, interactiveAgentArgv, listSubSessions } = require('../shared/sub-sessions.cjs');
 
 // The home map the rail renders from, with launch-known accounts filled in
 // where the index has nothing to say yet. Returns the SAME object when there is
@@ -156,6 +159,8 @@ function createSidebarBridge(options = {}) {
     });
   const makeClient = options.createControlClient || createControlClient;
   const emitter = new EventEmitter();
+  const publisher = createSidebarPublisher();
+  let paneRows = new Map();
   let liveState = { workspaces: [], panes: [] };
   let historySessions = [];
   let historyById = new Map();
@@ -164,7 +169,12 @@ function createSidebarBridge(options = {}) {
   // Identity outlives the 48h evidence window. Keep only child -> parent ids,
   // never commands or prompts, in the relocated cache selected by composition.
   let delegationLinks = null;
-  const liveSessionIds = () => liveState.panes.map((p) => typeof p.agent_session === 'string' ? p.agent_session : p.agent_session?.value).filter(Boolean);
+  let seededHistory = null; let previousEvidenceIds = new Set(); let summaryIds = new Set();
+  const sessionId = (p) => typeof p?.agent_session === 'string' ? p.agent_session : p?.agent_session?.value;
+  const interactivePanes = new Map();
+  const resolvedPanes = () => (providerLinker ? providerLinker.apply(liveState.panes) : liveState.panes)
+    .map((pane) => ({ ...pane, isLiveInteractive: interactivePanes.get(pane.pane_id)?.interactive === true }));
+  const liveSessionIds = () => resolvedPanes().map(sessionId).filter(Boolean);
   const refreshDelegations = createSingleFlight(async () => {
     if (!delegationIndex || closed) return;
     if (delegationLinks === null) {
@@ -173,7 +183,10 @@ function createSidebarBridge(options = {}) {
     }
     const liveIds = liveSessionIds();
     // Durable exact links must reach the evidence scan on its first pass too.
-    for (const row of historySessions) row.delegatedBy = row.lineage?.parentThreadId || delegationLinks[row.id] || null;
+    if (seededHistory !== historySessions) {
+      for (const row of historySessions) row.delegatedBy = row.lineage?.parentThreadId || delegationLinks[row.id] || null;
+      seededHistory = historySessions;
+    }
     const result = await delegationIndex.scan(historySessions, liveIds);
     if (closed) return;
     const built = result.built || buildDelegationGroups(result.parents, result.providers);
@@ -182,18 +195,33 @@ function createSidebarBridge(options = {}) {
     if (Object.keys(updates).length) {
       if (options.delegationLinksFile) delegationLinks = await mergeDelegationLinks(options.delegationLinksFile, updates);
       else for (const [id, parent] of Object.entries(updates)) { if (parent) delegationLinks[id] = parent; else delete delegationLinks[id]; }
+      delegationIndex.updateLinks?.(updates);
     }
     const dispatched = new Set(built.dispatches.map((d) => `${d.parentId}:${d.id}`));
     for (const parent of result.parents) for (const task of parent.background.tasks) task.delegated = dispatched.has(`${parent.id}:${task.id}`);
     delegationGroups = built.groups;
     const parents = new Map(result.parents.map((p) => [p.id, p]));
-    for (const row of historySessions) {
+    const summaries = delegationSummaries(delegationGroups, Date.now(), liveSessionIds());
+    const changedIds = new Set([...previousEvidenceIds, ...parents.keys(), ...Object.keys(updates), ...summaryIds, ...summaries.keys()]);
+    previousEvidenceIds = new Set(parents.keys()); summaryIds = new Set(summaries.keys());
+    const patches = new Map();
+    let membershipChanged = false;
+    for (const id of changedIds) {
+      const row = historyById.get(id); if (!row) continue;
+      const wasSubSession = isSubSession(row);
       const background = parents.get(row.id)?.background;
       row.ownerEvidence = parents.get(row.id)?.ownerEvidence;
       if (background) row.background = { ...background, tasks: undefined, outstanding: (background.outstanding || []).map(({ command, prompt, rounds, ...task }) => task) };
       row.delegatedBy = row.lineage?.parentThreadId || delegationLinks[row.id] || null;
+      membershipChanged ||= wasSubSession !== isSubSession(row);
+      patches.set(id, { background: row.background || null, ownerEvidence: row.ownerEvidence || null,
+        delegatedBy: row.delegatedBy || null, isSubSession: isSubSession(row), delegationSummary: summaries.get(id) || null });
     }
-    publish();
+    // Evidence refreshes may follow an idle event. Reuse the resident rail
+    // rows here, rather than rebuilding and diffing the whole history again.
+    if (membershipChanged) { publish(); return; }
+    const delta = publisher.patchRows(patches);
+    if (delta) emitter.emit('update', { ...publisher.getState(), delta });
   });
   // indexerSessionCount keeps its contract: harbor-index.py's CLAUDE session
   // count (the boot spec compares it against `emit --all` directly); provider
@@ -221,6 +249,7 @@ function createSidebarBridge(options = {}) {
   // A daemon that predates the verb stops the polling until the next connect.
   let dormantSessions = {};
   let dormantTimer = null;
+  let dormantSupported = true;
   const DORMANT_POLL_MS = 15_000;
 
   // Agent detection names a codex/cursor pane's agent but not its session, so those
@@ -265,18 +294,56 @@ function createSidebarBridge(options = {}) {
     })
   );
 
+  let paneSet = '';
+  const refreshInteractivePanes = async () => {
+    const client = daemonClient; if (!client?.processInfo || closed) return;
+    let changed = false;
+    const panes = resolvedPanes();
+    for (const pane of panes) {
+      if (!isSubSession(historyById.get(sessionId(pane)))) continue;
+      const old = interactivePanes.get(pane.pane_id);
+      if (old && (old.pending || Date.now() - old.at < 15_000)) continue;
+      const entry = { ...old, at: Date.now(), pending: true }; interactivePanes.set(pane.pane_id, entry);
+      try {
+        const result = await client.processInfo(pane.pane_id);
+        if (closed || client !== daemonClient || interactivePanes.get(pane.pane_id) !== entry) continue;
+        const processes = (result?.process_info || result || {}).foreground_processes || [];
+        const provider = pane.agent || historyById.get(sessionId(pane))?.provider || 'claude';
+        // Tools and MCP servers can be below the agent in this chain. The
+        // first matching agent owns the pane, not its newest tool child.
+        const mode = processes.map((proc) => interactiveAgentArgv(provider, proc.argv)).find((value) => value !== null);
+        const interactive = mode === true;
+        changed ||= Boolean(old?.interactive) !== interactive;
+        entry.interactive = interactive;
+      } catch {
+        changed ||= Boolean(entry.interactive);
+        entry.interactive = false;
+      }
+      finally { entry.pending = false; }
+    }
+    if (changed && !closed) publish();
+  };
   const publish = () => {
     if (closed) return;
+    const ids = new Set(liveState.panes.map((p) => p.pane_id));
+    for (const id of interactivePanes.keys()) if (!ids.has(id)) interactivePanes.delete(id);
+    const nextPaneSet = JSON.stringify([...ids].sort());
+    if (nextPaneSet !== paneSet) { paneSet = nextPaneSet; emitter.emit('panes-changed'); }
+    refreshInteractivePanes();
     // The header agents chip is aged on every publish, the overview's rule:
     // shown while a group is active or recently done, gone after.
     const summaries = delegationSummaries(delegationGroups, Date.now(), liveSessionIds());
+    summaryIds = new Set(summaries.keys());
     for (const row of historySessions) row.delegationSummary = summaries.get(row.id) || null;
+    const livePanes = resolvedPanes();
+    const liveIds = new Set(livePanes.map((p) => typeof p.agent_session === 'string' ? p.agent_session : p.agent_session?.value));
+    const railHistory = historySessions.filter((row) => !isSubSession(row) || liveIds.has(row.id));
     const model = mergeSidebarModel({
-      historySessions,
+      historySessions: railHistory,
       // The daemon does not name a codex/cursor session; the linker fills the id in
       // from the CLI's own files so those panes merge with their history row
       // instead of floating as anonymous live: entries.
-      livePanes: providerLinker ? providerLinker.apply(liveState.panes) : liveState.panes,
+      livePanes,
       workspaces: liveState.workspaces,
       // FILL only, the same contract the window's launch facts follow: the
       // index is a real fact about a session on disk and outranks the argv,
@@ -284,21 +351,40 @@ function createSidebarBridge(options = {}) {
       homes: withLaunchedHomes(homes, launchedHomes),
       dormantSessions,
     });
-    emitter.emit('update', {
+    const delta = publisher.publish({
       model,
-      historyCount: historySessions.length,
+      historyCount: railHistory.length,
       indexerSessionCount: claudeHistoryCount,
     });
+    paneRows = new Map();
+    for (const project of publisher.getState().model.projects) for (const row of project.sessions) {
+      if (row.paneId) paneRows.set(row.paneId, row.id);
+    }
+    if (delta) emitter.emit('update', { ...publisher.getState(), delta });
   };
 
   // Agent status can chatter during tool transitions. Collapse a same-frame
   // burst into one sidebar render while still forwarding every raw event to
   // the notification driver.
-  const scheduleStatusPublish = () => {
+  const pendingStatuses = new Map();
+  let statusNeedsMerge = false;
+  const scheduleStatusPublish = (event) => {
+    const { pane_id: paneId, agent_status: status } = event.data;
+    if (status === 'unknown' || !paneRows.has(paneId)) statusNeedsMerge = true;
+    else pendingStatuses.set(paneRows.get(paneId), { agentStatus: status });
     if (statusPublishTimer) return;
     statusPublishTimer = setTimeout(() => {
       statusPublishTimer = null;
-      publish();
+      if (statusNeedsMerge) publish();
+      else {
+        const summaries = delegationSummaries(delegationGroups, Date.now(), liveSessionIds());
+        for (const id of new Set([...summaryIds, ...summaries.keys()])) pendingStatuses.set(id, { ...pendingStatuses.get(id), delegationSummary: summaries.get(id) || null });
+        summaryIds = new Set(summaries.keys());
+        const delta = publisher.patchRows(pendingStatuses);
+        if (delta) emitter.emit('update', { ...publisher.getState(), delta });
+      }
+      pendingStatuses.clear();
+      statusNeedsMerge = false;
     }, 16);
     statusPublishTimer.unref?.();
   };
@@ -307,7 +393,7 @@ function createSidebarBridge(options = {}) {
     const previousState = liveState;
     liveState = applyPaneEvent(liveState, event);
     emitter.emit('pane-agent-status', event);
-    if (liveState !== previousState) scheduleStatusPublish();
+    if (liveState !== previousState) scheduleStatusPublish(event);
   };
 
   // Where the last refresh spent its time, for the lifecycle log's
@@ -358,6 +444,7 @@ function createSidebarBridge(options = {}) {
       backgroundScanMs: Date.now() - providersDone,
     };
     publish();
+    emitter.emit('history-refreshed');
   });
 
   // A refresh that failed is retried on the bridge's own clock. The fs watcher
@@ -418,7 +505,7 @@ function createSidebarBridge(options = {}) {
     try {
       next = await client.dormantSessions();
     } catch (error) {
-      if (/unsupported verb/.test(String(error?.message))) { clearInterval(dormantTimer); dormantTimer = null; }
+      if (/unsupported verb/.test(String(error?.message))) dormantSupported = false;
       return;
     }
     if (closed || client !== daemonClient) return;
@@ -432,6 +519,8 @@ function createSidebarBridge(options = {}) {
     subscription?.close?.();
     clearInterval(dormantTimer);
     dormantTimer = null;
+    dormantSupported = true;
+    interactivePanes.clear();
     daemonClient = makeClient(options.daemonOptions || {});
     try {
       const boot = await daemonClient.bootstrap({
@@ -439,6 +528,7 @@ function createSidebarBridge(options = {}) {
         onResync: (freshSnapshot, { discarded }) => {
           if (discarded) console.log('sidebar-bridge: resync after replay settle, discarded', discarded, 'events');
           liveState = extractLiveState({ snapshot: freshSnapshot });
+          interactivePanes.clear();
           publish();
         },
         onEvent: (event) => {
@@ -446,6 +536,9 @@ function createSidebarBridge(options = {}) {
           if (event?.event === 'pane.agent_status_changed') {
             onPaneAgentStatus(event);
           } else {
+            if (event?.event === 'pane.agent_detected' || (event?.event === 'pane.updated' && Object.hasOwn(event.data?.pane || {}, 'agent'))) {
+              interactivePanes.delete(event.data?.pane_id || event.data?.pane?.pane_id);
+            }
             liveState = applyPaneEvent(liveState, event);
             publish();
           }
@@ -456,8 +549,8 @@ function createSidebarBridge(options = {}) {
       subscription.on('close', () => { if (!closed) scheduleReconnect(); });
       liveState = extractLiveState(boot.snapshot);
       publish();
-      if (daemonClient?.dormantSessions) {
-        dormantTimer = setInterval(() => { refreshDormant(); }, DORMANT_POLL_MS);
+      {
+        dormantTimer = setInterval(() => { if (dormantSupported) refreshDormant(); refreshInteractivePanes(); }, DORMANT_POLL_MS);
         dormantTimer.unref?.();
         refreshDormant();
       }
@@ -541,19 +634,47 @@ function createSidebarBridge(options = {}) {
     refreshHistory,
     startTimings: () => ({ ...refreshTimings, daemonConnectMs }),
     refreshDelegations,
-    listDelegations: () => ageDelegationGroups(delegationGroups, Date.now(), liveSessionIds()),
-    isDelegatedPane: (paneId) => {
-      const pane = liveState.panes.find((p) => p.pane_id === paneId);
-      const id = typeof pane?.agent_session === 'string' ? pane.agent_session : pane?.agent_session?.value;
-      return Boolean(historyById.get(id)?.delegatedBy);
+    startBackgroundMigration: () => {
+      history.startBackgroundMigration?.();
+      providerHistory?.startBackgroundMigration?.();
     },
-    isDelegated: (id) => Boolean(historyById.get(id)?.delegatedBy),
+    listDelegations: () => ageDelegationGroups(delegationGroups, Date.now(), liveSessionIds()),
+    listSubSessions: (request) => {
+      const live = new Map();
+      for (const pane of resolvedPanes()) live.set(sessionId(pane), pane);
+      return listSubSessions(historySessions.map((row) => ({ ...row, isLive: live.has(row.id), agentStatus: live.get(row.id)?.agent_status,
+        dormant: !live.has(row.id) && sleptSince(dormantSessions[row.id], parseLocalDateTime(row.lastActive)?.getTime() || 0),
+      })), request);
+    },
+    getSession: (id) => {
+      const row = historyById.get(id);
+      if (!row) return null;
+      const panes = resolvedPanes();
+      return mergeSidebarModel({ historySessions: [row], homes, workspaces: liveState.workspaces, dormantSessions,
+        livePanes: panes.filter((p) => (typeof p.agent_session === 'string' ? p.agent_session : p.agent_session?.value) === id),
+      }).projects.flatMap((p) => p.sessions).find((s) => s.id === id) || null;
+    },
+    getHistoryRows: () => historySessions,
+    getSessionLabel: (id) => {
+      const row = historyById.get(id);
+      return row ? { title: row.title, project: row.project } : null;
+    },
+    isDelegatedPane: (paneId) => {
+      const pane = resolvedPanes().find((p) => p.pane_id === paneId);
+      const id = typeof pane?.agent_session === 'string' ? pane.agent_session : pane?.agent_session?.value;
+      return subSessionReadOnly({ ...historyById.get(id), isLive: Boolean(pane), isLiveInteractive: pane?.isLiveInteractive });
+    },
+    isDelegated: (id) => {
+      const panes = resolvedPanes().filter((p) => sessionId(p) === id);
+      return subSessionReadOnly({ ...historyById.get(id), isLive: panes.length > 0, isLiveInteractive: panes.at(-1)?.isLiveInteractive });
+    },
     notificationState: (paneId) => {
-      const pane = liveState.panes.find((p) => p.pane_id === paneId);
+      const pane = resolvedPanes().find((p) => p.pane_id === paneId);
       if (!pane) return { alive: false };
       const id = typeof pane.agent_session === 'string' ? pane.agent_session : pane.agent_session?.value;
       const row = historyById.get(id);
-      return { alive: true, delegatedBy: row?.delegatedBy, working: pane.agent_status === 'working' || freshWorking(row?.background),
+      const readOnly = subSessionReadOnly({ ...row, isLive: true, isLiveInteractive: pane.isLiveInteractive });
+      return { alive: true, delegatedBy: readOnly ? (row?.delegatedBy || 'sub-session') : null, working: pane.agent_status === 'working' || freshWorking(row?.background),
         background: Boolean(row?.background?.outstanding?.length || row?.background?.awaitingFinal) };
     },
     // Called by the launch flow with the profile it actually passed to the CLI
@@ -577,6 +698,12 @@ function createSidebarBridge(options = {}) {
     // Claude ids resolve through the indexer; codex/cursor ids through the
     // provider scan (path + provider, so transcript open needs no hints).
     getSessionMeta: async (id) => {
+      const indexed = historyById.get(id);
+      // The bulk index refresh already has these facts. Orch summary polls
+      // and send lookups must not enqueue one worker RPC per historical row.
+      if (indexed?.meta) return { ...indexed.meta, home: indexed.home ?? null };
+      const providerMeta = providerHistory?.metaFor(id);
+      if (providerMeta) return providerMeta;
       try {
         return await history.sessionMeta(id);
       } catch (error) {
@@ -590,17 +717,9 @@ function createSidebarBridge(options = {}) {
     // right then names the session in seconds instead of at the next tick.
     resolveProviderSessions: () => providerLinker?.resolveNow() ?? false,
     providerSessionForPane: (paneId) => providerLinker?.get(paneId) ?? null,
-    getState: () => ({
-      model: mergeSidebarModel({
-        historySessions,
-        livePanes: providerLinker ? providerLinker.apply(liveState.panes) : liveState.panes,
-        workspaces: liveState.workspaces,
-        homes,
-        dormantSessions,
-      }),
-      historyCount: historySessions.length,
-      indexerSessionCount: claudeHistoryCount,
-    }),
+    getLivePaneIds: () => liveState.panes.map((pane) => pane.pane_id),
+    getHistoryRow: (id) => historyById.get(id),
+    getState: () => publisher.getState(),
   };
 }
 

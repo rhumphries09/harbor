@@ -446,7 +446,13 @@ function createArtifactsProvider(options = {}) {
       }
       const artifacts = await assemblePromise;
       kickCollect();
-      return { ok: true, artifacts, scannedAt: lastScanMs };
+      // Files need the labels of their own source sessions, including machine
+      // runs absent from the rail. Resolve only this request's artifact ids.
+      const labeled = options.getSessionLabel ? artifacts.map((artifact) => {
+        const session = options.getSessionLabel(artifact.sessionId);
+        return { ...artifact, sessionTitle: session?.title || null, sessionProject: session?.project || null };
+      }) : artifacts;
+      return { ok: true, artifacts: labeled, scannedAt: lastScanMs };
     },
     // The artifact protocol serves ONLY indexed files and their sibling assets
     // (a report's ./chart.png), never an arbitrary path.

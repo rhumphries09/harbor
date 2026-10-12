@@ -11,16 +11,20 @@ async function runIndexer(args) { return defaultIndex.run(args); }
 
 function parseEmitTsv(text) {
   return String(text).split(/\r?\n/).filter(Boolean).map((line) => {
-    const parts = line.split('\t');
-    const [id, lastActive, project, title, firstPrompt, cwd, file] = parts;
+    const columns = line.split('\t');
+    const parts = columns.length < 11 ? columns : columns.map((value) => value.replace(/\\([\\tnr])/g, (_, char) => ({ t: '\t', n: '\n', r: '\r', '\\': '\\' })[char]));
+    const [id, lastActive, project, title, firstPrompt, cwd, file, entrypoint, start, mt, hasTitle] = parts;
     return {
       id,
       lastActive,
       project: (project || '').trim(),
-      title: title || '',
-      firstPrompt: firstPrompt || null,
+      title: title || (parts.length >= 11 ? '(no user messages)' : ''),
+      firstPrompt: firstPrompt ? [...firstPrompt.replace(/[\t\n]/g, ' ')].slice(0, 300).join('') : null,
       cwd: cwd || null,
       ...(file ? { path: file } : {}),
+      ...(entrypoint ? { entrypoint } : {}),
+      ...(parts.length >= 11 ? { meta: { id, cwd: cwd || null, project: (project || '').trim(), title: hasTitle === '0' ? null : title,
+        firstPrompt: firstPrompt || null, path: file, entrypoint: entrypoint || null, start: start || null, mt: Number(mt) || null } } : {}),
     };
   });
 }
@@ -57,6 +61,21 @@ function createHistoryProvider(options = {}) {
   const projectsPath = options.projectsPath || defaults.paths.projectsDir;
   let timer = null;
   let watcher = null;
+  let migrationTimer = null; let migrationClosed = false;
+  provider.startBackgroundMigration = () => {
+    if (migrationTimer || migrationClosed || !historyIndex.migrateEntries) return;
+    let changed = false;
+    const step = async () => {
+      try {
+        const result = await historyIndex.migrateEntries(32);
+        changed ||= result.changed > 0;
+        if (migrationClosed) return;
+        if (result.remaining && result.changed) migrationTimer = setTimeout(step, 100);
+        else { migrationTimer = null; if (changed) provider.emit('history-changed'); }
+      } catch { migrationTimer = null; }
+    };
+    migrationTimer = setTimeout(step, 0);
+  };
 
   const changed = () => {
     clearTimeout(timer);
@@ -90,7 +109,7 @@ function createHistoryProvider(options = {}) {
   }
 
   provider.listSessions = async ({ since, project, query } = {}) => {
-    const args = ['emit', '--all', '--with-first-prompt', '--with-cwd', '--with-path'];
+    const args = ['emit', '--all', '--with-first-prompt', '--with-cwd', '--with-path', '--with-entrypoint', '--with-meta'];
     if (since) args.push('--since', String(since));
     if (project) args.push('--project', String(project));
     const sessions = parseEmitTsv(await execute(args));
@@ -103,6 +122,7 @@ function createHistoryProvider(options = {}) {
   provider.sessionHomes = async () => historyIndex.buildHomeMap();
   provider.sessionPreview = (id) => execute(['preview', String(id)]);
   provider.close = () => {
+    migrationClosed = true; clearTimeout(migrationTimer);
     clearTimeout(timer);
     timer = null;
     if (watcher) watcher.close();

@@ -126,3 +126,68 @@
   .mobile-sheet-backdrop, .settings-sheet, .newsession-sheet { animation-duration: .01ms; }
   .shell-drawer { animation-duration: .01ms; }
 }
+
+/* Session facts under the header (2026-10-11): context, status, cache.
+   Colours follow the desktop rail (rail-status.cjs): working = accent blue,
+   waiting on you = amber, idle and ready = live green, not running = grey.
+   Static on purpose: Harbor status lights never animate. */
+.hdr-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 24px;
+  padding: 2px calc(var(--space-2, 8px) + 4px) 6px;
+  font-size: 12.5px;
+  color: var(--sub);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.hdr-ctx { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+.hdr-ring {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: conic-gradient(var(--ac) var(--pct), rgba(255, 255, 255, 0.14) 0);
+  flex: 0 0 auto;
+}
+.hdr-ctx.warn .hdr-ring { background: conic-gradient(var(--warn) var(--pct), rgba(255, 255, 255, 0.14) 0); }
+.hdr-ctx-num { color: var(--tx); font-weight: 600; font-variant-numeric: tabular-nums; }
+.hdr-ctx.warn .hdr-ctx-num { color: var(--warn); }
+.hdr-ctx-unit { color: var(--fnt); }
+.hdr-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.hdr-status::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: 1px;
+  background: var(--fnt);
+}
+.hdr-status-working { color: color-mix(in srgb, var(--ac) 70%, white); }
+.hdr-status-working::before { background: var(--ac); }
+.hdr-status-blocked { color: var(--warn); }
+.hdr-status-blocked::before { background: var(--warn); }
+.hdr-status-idle::before { background: var(--live); }
+.hdr-status-off { color: var(--fnt); }
+.hdr-cache {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--sub);
+  font-size: 11.5px;
+}
+.hdr-cache::before { content: 'cache '; color: var(--fnt); }
+.hdr-cache.cache-warm { color: var(--live); }
+.hdr-cache.cache-expired { color: var(--fnt); }
+
+.connection-banner.reconnecting {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--sub);
+}
+.connection-banner.reconnecting .connection-dot { background: var(--warn); }
+.hdr-status-stale { color: var(--fnt); }
+

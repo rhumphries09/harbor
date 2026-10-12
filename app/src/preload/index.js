@@ -318,6 +318,8 @@ const api = {
   orchestration: {
     listRuns: () => ipcRenderer.invoke('orchestration:list-runs'),
     listDelegations: () => ipcRenderer.invoke('orchestration:list-delegations'),
+    listSubSessions: (request) => ipcRenderer.invoke('orchestration:list-sub-sessions', request),
+    getSession: (id) => ipcRenderer.invoke('orchestration:get-session', { id }),
     getData: (payload) => ipcRenderer.invoke('orchestration:get-data', payload),
     watch: (payload) => ipcRenderer.invoke('orchestration:watch', payload),
     unwatch: () => ipcRenderer.invoke('orchestration:unwatch'),

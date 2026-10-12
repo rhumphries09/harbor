@@ -153,6 +153,40 @@ function baseProviders(root, transcriptPath) {
   };
 }
 
+// The phone gets its own projection (phone-rail.js, 2026-10-11): a whole
+// snapshot of what its drawer shows, never desktop deltas and never all
+// history. Before this the push was the full model (3.96 MB live).
+test('phone sidebar pushes and serves the phone projection, never desktop deltas or all history', async (t) => {
+  const isolated = await fixture(t);
+  const providers = baseProviders(isolated.root, null);
+  const composed = await composeServer({ ...isolated, ...providers,
+    allowedTailnetLogins: [], selfOriginHosts: ['127.0.0.1'],
+    terminalBridge: { emitter: new EventEmitter(), start() {}, close() {} },
+  });
+  t.after(() => composed.close());
+  const received = [];
+  composed.router.onPush((channel, payload) => { if (channel === 'sidebar:update') received.push(payload); });
+  const old = Date.now() - 10 * 86_400_000;
+  const snapshot = { version: 4, model: { projects: [{ label: 'Sample', sessions: [
+    { id: 'interactive', isSubSession: false, isLive: true, lastActiveMs: old },
+    { id: 'old-history', isSubSession: false, lastActiveMs: old },
+  ] }], liveProjects: [] }, historyCount: 2, indexerSessionCount: 2 };
+  providers.sidebar.getState = () => snapshot;
+  providers.sidebar.emitter.emit('update', { ...snapshot, delta: { kind: 'delta', base: 3, version: 4 } });
+  await new Promise((resolve) => setTimeout(resolve, 2100));
+  assert.equal(received.length, 1);
+  assert.equal('delta' in received[0], false, 'no desktop delta reaches the phone');
+  const pushedIds = received[0].model.projects.flatMap((p) => p.sessions.map((s) => s.id));
+  assert.deepEqual(pushedIds, ['interactive'], 'the push is live + 48 h, not all history');
+  assert.equal(received[0].historyCount, 2);
+  const served = await composed.router.call('sidebar:get-state');
+  assert.deepEqual(served.model.projects.flatMap((p) => p.sessions.map((s) => s.id)), ['interactive']);
+  const wide = await composed.router.call('sidebar:get-state', { days: 'all' });
+  assert.deepEqual(wide.model.projects.flatMap((p) => p.sessions.map((s) => s.id)), ['interactive', 'old-history']);
+  const found = await composed.router.call('sidebar:get-state', { query: 'old-history' });
+  assert.deepEqual(found.model.projects.flatMap((p) => p.sessions.map((s) => s.id)), ['old-history']);
+});
+
 test('headless composition exposes the phone providers and preserves explicit fail-closed methods', async (t) => {
   const isolated = await fixture(t);
   const sessionId = '11111111-1111-4111-8111-111111111111';
@@ -291,6 +325,36 @@ test('delegated sessions refuse every phone write entry point', async (t) => {
     ['session:menu-answer', { sessionId: 'child' }], ['session:interrupt', { paneId: 'child-pane' }],
     ['capabilities:cycle-permission-mode', { paneId: 'child-pane' }], ['resume-session', { id: 'child' }], ['session:takeover', { sessionId: 'child' }],
   ]) assert.match((await composed.router.call(method, payload)).reason, /read-only/, method);
+});
+
+test('phone can send to a helper resumed as a live TUI while headless helpers remain read-only', async (t) => {
+  const isolated = await fixture(t);
+  const providers = baseProviders(isolated.root, null);
+  const history = new EventEmitter();
+  history.listSessions = async () => ['resumed', 'headless'].map((id) => ({ id, title: id, project: 'Synthetic project', entrypoint: 'sdk-cli', lastActive: '2026-10-11 10:00' }));
+  history.sessionHomes = async () => ({});
+  const subscription = new EventEmitter(); subscription.close = () => {};
+  providers.sidebar = require('../../src/main/sidebar-bridge.js').createSidebarBridge({ history, providerHistory: null, providerSessionLinker: null, delegationIndex: null,
+    createControlClient: () => ({
+      bootstrap: async () => ({ subscription, snapshot: { panes: ['resumed', 'headless'].map((id) => ({ pane_id: id, agent: 'claude', agent_session: { kind: 'id', value: id } })) } }),
+      processInfo: async (id) => ({ foreground_processes: [{ pid: 123, argv: ['claude.exe', ...(id === 'headless' ? ['-p'] : []), '--resume', id] }] }),
+    }),
+  });
+  const sent = [];
+  const composed = await composeServer({ userDataDir: isolated.userDataDir, env: isolated.env, ...providers,
+    sessionSend: { emitter: new EventEmitter(), send: async (request) => { sent.push(request); return { ok: true }; } },
+    terminalBridge: { emitter: new EventEmitter(), start: async () => {}, close() {} },
+    usage: { getUsage: async () => ({}) }, capabilities: { get: async () => ({}) }, workflowRuns: { runsForSession: async () => [] },
+  });
+  t.after(() => composed.close());
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const snapshot = await composed.router.call('sidebar:get-state');
+  const rows = snapshot.model.projects.flatMap((p) => p.sessions);
+  assert.equal(rows.find((row) => row.id === 'resumed').isLiveInteractive, true);
+  assert.deepEqual(await composed.router.call('session:send', { sessionId: 'resumed', text: 'Synthetic request' }), { ok: true });
+  assert.equal(sent.length, 1);
+  await assert.rejects(composed.router.call('session:send', { sessionId: 'headless', text: 'Should refuse' }), /read-only/);
+  assert.equal(sent.length, 1);
 });
 
 test('phone delegation reads expire closed parents through the same bridge as desktop', async (t) => {

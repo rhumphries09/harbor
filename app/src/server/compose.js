@@ -1,4 +1,5 @@
 'use strict';
+const { subSessionReadOnly } = require('../shared/sub-sessions.cjs');
 
 const http = require('node:http');
 const fs = require('node:fs/promises');
@@ -48,6 +49,8 @@ const { createClientResources } = require('./client-resources.js');
 const { ensureServerToken } = require('./transport/auth.js');
 const { createTailnetAuthorizer, resolveAllowedLogins } = require('./transport/tailnet-identity.js');
 const { createImageUploader } = require('./upload.js');
+const { projectRail, createContextReader } = require('./phone-rail.js');
+const { createLinkWatchdog } = require('./link-watchdog.js');
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 
@@ -162,6 +165,7 @@ async function composeServer(options = {}) {
   const defaultUserDataPath = defaultUserDataDir({ env });
   const profile = { userDataPath: userDataDir, defaultUserDataPath };
   const contextDir = resolveContextDir(env);
+  const contextPct = createContextReader(contextDir);
   const signalPolicy = resolveSignalPolicy({ ...profile, contextDir });
   const launchPolicy = resolveLaunchPolicy(profile);
   const sessionStorePolicy = resolveSessionStorePolicy({ ...profile, env });
@@ -208,6 +212,7 @@ async function composeServer(options = {}) {
     }),
   });
   const artifacts = options.artifacts || createArtifactsProvider({
+    getSessionLabel: (id) => sidebar.getSessionLabel?.(id),
     roots: env.HARBOR_ARTIFACTS_ROOTS
       ? env.HARBOR_ARTIFACTS_ROOTS.split(path.delimiter).filter(Boolean)
       : [config.paths.projectsDir],
@@ -326,7 +331,7 @@ async function composeServer(options = {}) {
     ownsSession: (id) => {
       const sessions = (sidebar.getState()?.model?.projects || []).flatMap(project => project.sessions || []);
       const session = sessions.find(candidate => candidate.id === id);
-      if (!session?.isLive || !session.paneId || session.isChildTask || session.delegatedBy) return null;
+      if (!session?.isLive || !session.paneId || subSessionReadOnly(session)) return null;
       return { paneId: session.paneId, workspaceId: session.workspaceId || null };
     },
   });
@@ -335,7 +340,16 @@ async function composeServer(options = {}) {
   const changePlan = createPlanChange({ profiles: config.profiles, sidebar, sessionSend, sessionOwnerProbe,
     launchActions, links, emitLaunched: payload => router.emit('session:launched', payload) });
   const handlers = {
-    'sidebar:get-state': () => sidebar.getState(),
+    // The phone's projection (phone-rail.js): live rows plus the drawer's window,
+    // or a capped search across all history. Never the whole history model.
+    'sidebar:get-state': (payload) => projectRail(sidebar.getState(), payload || {}, { contextPct }),
+    // The live task meter under the window header, parsed off the pane's
+    // status line: numbers only, read-only (channels.js moved it to remote-safe
+    // 2026-10-11 so the phone header can show it).
+    'session:work-meter': async (payload = {}) => {
+      if (sidebar.isDelegatedPane?.(payload?.pane?.paneId)) return null;
+      try { return await sessionSend.getWorkMeter?.(payload) ?? null; } catch { return null; }
+    },
     'new-session:options': () => newSessionOptions(config),
     'new-session:folder': (payload = {}) => candidateProjectFolders(sidebar, payload),
     'new-session': async (payload = {}) => {
@@ -406,6 +420,8 @@ async function composeServer(options = {}) {
       catch (error) { return { ok: false, reason: error.message }; }
     },
     'orchestration:list-delegations': () => sidebar.listDelegations(),
+    'orchestration:list-sub-sessions': (request) => sidebar.listSubSessions(request),
+    'orchestration:get-session': ({ id }) => sidebar.getSession(id),
     'session:send-queue': ({ sessionId } = {}) => sessionSend.getQueueState(sessionId),
     'session:cancel-send': ({ sessionId, sendId } = {}) => sessionSend.cancelQueued(sessionId, sendId),
     'session:interrupt': ({ paneId } = {}) => sidebar.isDelegatedPane?.(paneId) ? { ok: false, reason: 'Delegated agents are read-only.' } : paneId
@@ -508,8 +524,18 @@ async function composeServer(options = {}) {
   // desktop root has (cf. resolveSignalPolicy, "the 4th time this repo lost
   // isolation"). Anything wired below that can emit 'error' needs a listener
   // here, not just its happy-path channel.
+  // The links that wedge are the long-lived daemon clients the sidebar and
+  // terminal bridges hold (link-watchdog.js). Off under every harness: a test
+  // composition must never exit its runner.
+  const harnessed = env.HARBOR_E2E === '1' || env.HARBOR_NO_DAEMON_START === '1' || options.skipDaemonStart;
+  const linkWatchdog = options.linkWatchdog !== undefined ? options.linkWatchdog : (harnessed ? null : createLinkWatchdog({
+    ping: () => createControlClient({ env, sessionStorePolicy }).ping(),
+    exit: (code) => process.exit(code),
+    log: (message) => console.error(`harbor-server: ${message}`),
+  }));
   const onSubsystemError = (source) => (error) => {
     console.error(`harbor-server: ${source} error (continuing):`, error?.message || error);
+    if (source === 'sidebar' || source === 'terminal-bridge') linkWatchdog?.note(source, error);
   };
   sidebar.emitter?.on('error', onSubsystemError('sidebar'));
   transcript.emitter?.on('error', onSubsystemError('transcript'));
@@ -528,11 +554,15 @@ async function composeServer(options = {}) {
   let sidebarThrottlePayload = null;
   const SIDEBAR_THROTTLE_MS = 2000;
   sidebar.emitter?.on('update', (payload) => {
-    sidebarThrottlePayload = payload;
+    // Desktop deltas cannot be coalesced by the mobile latest-state queue.
+    const { delta, ...snapshot } = payload;
+    sidebarThrottlePayload = snapshot;
     if (sidebarThrottleTimer) return;
     sidebarThrottleTimer = setTimeout(() => {
       sidebarThrottleTimer = null;
-      router.emit('sidebar:update', sidebarThrottlePayload);
+      // The default projection (live + 48 h): every phone's Today and 48h views
+      // are served by it whole; a wider window or a search asks get-state.
+      router.emit('sidebar:update', projectRail(sidebarThrottlePayload, {}, { contextPct }));
     }, SIDEBAR_THROTTLE_MS);
   });
   transcript.emitter?.on('update', (payload) => router.emit('transcript:update', payload));
@@ -542,6 +572,7 @@ async function composeServer(options = {}) {
   tasks.subscribe?.((doc) => router.emit('tasks:changed', { doc }));
   notes.subscribe?.((doc) => router.emit('notes:changed', { doc }));
   await sidebar.start?.();
+  sidebar.startBackgroundMigration?.();
   askInbox.start();
   await terminalBridge.start?.();
   await artifacts.list();

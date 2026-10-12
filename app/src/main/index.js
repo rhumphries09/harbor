@@ -1,4 +1,5 @@
 'use strict';
+const { subSessionReadOnly } = require('../shared/sub-sessions.cjs');
 
 const { app, crashReporter, BrowserWindow, Menu, ipcMain: electronIpcMain, dialog, clipboard, nativeImage, Notification, powerMonitor, protocol, session, shell } = require('electron');
 const fs = require('node:fs/promises');
@@ -729,7 +730,7 @@ async function captureSmoke(window) {
 
 function broadcastSidebarUpdate(payload) {
   if (!mainWindow) return;
-  sendToRenderer('sidebar:update', payload);
+  sendToRenderer('sidebar:update', payload.delta || payload);
 }
 
 function broadcastTerminalUpdate(payload) {
@@ -1500,11 +1501,10 @@ function registerIpc() {
     const windowFloorMs = incompleteBatches.length === 0
       ? Infinity
       : (dispatchStamps.length ? Math.min(...dispatchStamps) - DISPATCH_SLACK_MS : 0);
-    const projects = sidebarBridge.getState()?.model?.projects || [];
-    const candidates = projects.flatMap((project) => project.sessions || []).filter((session) => (
+    const candidates = sidebarBridge.getHistoryRows().filter((session) => (
       exactIds.has(session.id)
       || ((session.isChildTask || /^BATCH TITLE:/i.test(String(session.firstPrompt || session.title || '')))
-        && (session.lastActiveMs || 0) >= windowFloorMs)
+        && (session.lastActiveMs || Date.parse(session.lastActive) || 0) >= windowFloorMs)
     ));
     // `finished` is read by the join for ACTIVE batches only (delegate.js
     // joinBatchesToSessions), so only a session that can join one is read:
@@ -1525,7 +1525,7 @@ function registerIpc() {
     const joinCandidate = async (session) => {
       const meta = await sidebarBridge.getSessionMeta(session.id).catch(() => null);
       if (!meta?.path) return { ...session, id: session.id };
-      const stat = await fs.stat(meta.path).catch(() => null);
+      const stat = needsFinished(session) ? await fs.stat(meta.path).catch(() => null) : null;
       // Only content-derived facts are cached; anything computed against the
       // wall clock would come back stale from a cache hit. The join derives
       // freshness from signalAt at its own read of the clock.
@@ -1644,6 +1644,8 @@ function registerIpc() {
   });
 
   ipcMain.handle('orchestration:list-delegations', () => sidebarBridge.listDelegations());
+  ipcMain.handle('orchestration:list-sub-sessions', (_event, request) => sidebarBridge.listSubSessions(request));
+  ipcMain.handle('orchestration:get-session', (_event, { id }) => sidebarBridge.getSession(id));
   ipcMain.handle('orchestration:list-runs', async () => {
     const queues = await delegateProvider.listQueues();
     const historyRows = await orchHistoryRows(queues);
@@ -2641,7 +2643,7 @@ app.whenReady().then(async () => {
   });
 
   sidebarBridge.emitter.on('update', broadcastSidebarUpdate);
-  sidebarBridge.emitter.on('update', scheduleTitler);
+  sidebarBridge.emitter.on('history-refreshed', scheduleTitler);
   sidebarBridge.emitter.on('error', (error) => {
     console.error('sidebar error', error);
     lifecycle.note('sidebar-error', { error: errorText(error) });
@@ -2760,6 +2762,7 @@ app.whenReady().then(async () => {
   // Artifacts view plumbing: transcript-driven discovery of agent-produced
   // files, served to the renderer ONLY through the allowlisted scheme.
   const artifactsProvider = createArtifactsProvider({
+    getSessionLabel: (id) => sidebarBridge.getSessionLabel(id),
     roots: [harborConfig.paths.projectsDir],
     cacheFile: path.join(harborConfig.paths.cacheDir, 'artifacts-index.json'),
   });
@@ -3031,9 +3034,14 @@ app.whenReady().then(async () => {
     if (data.agent_status === 'unknown' && data.pane_id) paneLinks?.dropPane(data.pane_id);
     // Read the append before an idle event can claim completion. The history
     // watcher is debounced and can otherwise arrive after the toast window.
-    sidebarBridge.refreshDelegations().then(() => notifier.onAgentStatusChanged(event)).catch(() => {});
+    // Only a completion needs the fresh background verdict. Tool-transition
+    // chatter must not scan the entire delegation corpus on every status.
+    if (data.agent_status === 'idle' || data.agent_status === 'done') {
+      sidebarBridge.refreshDelegations().then(() => notifier.onAgentStatusChanged(event)).catch(() => {});
+    } else notifier.onAgentStatusChanged(event);
   });
   sidebarBridge.emitter.on('update', () => notifier.onBackgroundChanged());
+  sidebarBridge.emitter.on('panes-changed', () => notifier.onBackgroundChanged());
 
   // Agent-status watcher: the daemon only delivers pane.agent_status_changed
   // with a per-pane subscription entry (verified live), so maintain one
@@ -3047,11 +3055,7 @@ app.whenReady().then(async () => {
     clearTimeout(agentSubTimer);
     agentSubTimer = setTimeout(() => {
       try {
-        const model = sidebarBridge?.getState()?.model;
-        const paneIds = [...new Set((model?.projects || [])
-          .flatMap((proj) => (proj.sessions || [])
-            .filter((sess) => sess.isLive && sess.paneId)
-            .map((sess) => sess.paneId)))].sort();
+        const paneIds = [...new Set(sidebarBridge?.getLivePaneIds() || [])].sort();
         const key = paneIds.join(',');
         if (key === agentSubKey) return;
         agentSubKey = key;
@@ -3075,7 +3079,7 @@ app.whenReady().then(async () => {
     }, 2000);
     agentSubTimer.unref?.();
   };
-  sidebarBridge.emitter.on('update', rebuildAgentWatcher);
+  sidebarBridge.emitter.on('panes-changed', rebuildAgentWatcher);
 
   terminalBridge.emitter.on('update', broadcastTerminalUpdate);
   terminalBridge.emitter.on('frame', (payload) => sendToRenderer('terminal:frame', payload));
@@ -3124,7 +3128,7 @@ app.whenReady().then(async () => {
           // An orchestration worker opens read-only, so a question it asked
           // would be claimed and then hidden; leave workers to the CLI's own
           // dialog (and the driver that watches their panes), as before.
-          if (session.isChildTask || session.delegatedBy) return null;
+          if (subSessionReadOnly(session)) return null;
           if (session.isLive && session.paneId) return { paneId: session.paneId, workspaceId: session.workspaceId || null };
         }
       }
@@ -3198,6 +3202,7 @@ app.whenReady().then(async () => {
   broadcastSidebarUpdate(sidebarBridge.getState());
   broadcastTerminalUpdate(terminalBridge.getState());
   createWindow();
+  sidebarBridge.startBackgroundMigration?.();
   lifecycle.note('window-created', {
     daemon: daemonBanner === 'ok' ? 'ok' : (daemonBanner?.error || 'unknown'),
     historyRows: sidebarBridge.getState().historyCount,

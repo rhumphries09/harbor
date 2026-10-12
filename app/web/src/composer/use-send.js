@@ -28,12 +28,20 @@ export function useSend({ sessionId, paneId, onSent }) {
     return true;
   }, []);
 
+  // A queue read while the socket is down is not an error worth a red line:
+  // the reconnect below reads it again (2026-10-11, a cold boot painting from
+  // the phone cache showed "not connected" twice under the conversation, and
+  // the line outlived the reconnect because a good read never cleared it).
   const refreshQueue = useCallback(async () => {
+    if (client.getState?.() !== 'connected') return;
     try {
       const next = await client.call('session:send-queue', { sessionId });
       setQueue(next || EMPTY_QUEUE);
+      setStatus((current) => (current?.fromQueueRead ? null : current));
     } catch (error) {
-      setStatus({ phase: 'error', detail: reasonFrom(error) });
+      const reason = reasonFrom(error);
+      if (/not connected|connection dropped/.test(reason)) return;
+      setStatus({ phase: 'error', detail: reason, fromQueueRead: true });
     }
   }, [client, sessionId]);
 

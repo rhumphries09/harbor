@@ -31,7 +31,7 @@ test('listSessions passes indexer filters and applies case-insensitive query', a
     watchFactory: () => ({ close() {} }),
   });
   const rows = await provider.listSessions({ since: '7d', project: 'alpha', query: 'needle' });
-  assert.deepEqual(calls, [['emit', '--all', '--with-first-prompt', '--with-cwd', '--with-path', '--since', '7d', '--project', 'alpha']]);
+  assert.deepEqual(calls, [['emit', '--all', '--with-first-prompt', '--with-cwd', '--with-path', '--with-entrypoint', '--with-meta', '--since', '7d', '--project', 'alpha']]);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].id, '1');
 });

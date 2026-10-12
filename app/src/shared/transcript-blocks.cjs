@@ -19,6 +19,10 @@
 function applyTranscriptUpdate(blocks, update) {
   if (Array.isArray(update?.replace)) return update.replace;
   let next = Array.isArray(blocks) ? blocks : [];
+  if (update?.removed?.length) {
+    const removed = new Set(update.removed);
+    next = next.filter((block) => !removed.has(block.key));
+  }
   if (update?.changed?.length) {
     const byKey = new Map(update.changed.map((block) => [block.key, block]));
     next = next.map((block) => byKey.get(block.key) || block);

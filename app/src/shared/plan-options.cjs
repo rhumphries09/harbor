@@ -1,4 +1,5 @@
 'use strict';
+const { subSessionReadOnly } = require('./sub-sessions.cjs');
 const { runStateCue } = require('./session-run-state.cjs');
 
 function providerPlans(options, provider) {
@@ -12,7 +13,7 @@ function selectedPlan(options, provider, id) {
 }
 function planMoveReason(session, header) {
   if (session?.provider !== 'claude') return 'Changing plans for an existing conversation is available for Claude only. Other providers keep history in separate homes.';
-  if (session.isChildTask || session.delegatedBy) return 'Delegated sessions are controlled by their parent.';
+  if (subSessionReadOnly(session)) return 'Machine-made sessions are read-only here.';
   if (!session.isLive || !session.paneId || /^(pane|live):/.test(session.id || '')) return 'Open a running conversation before changing its plan.';
   const cue = runStateCue(session, null, header);
   if (cue?.kind !== 'ready' || header?.working !== false) return 'Wait until this session is idle before changing its plan.';

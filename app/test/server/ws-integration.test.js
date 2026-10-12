@@ -15,14 +15,18 @@ function call(url, method, payload, options = {}) { return new Promise((resolve,
 
 test('real websocket serves sidebar and refuses unauthenticated mutation and local-only method', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'harbor-server-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const sidebar = { emitter: new EventEmitter(), async start() {}, close() {}, getState: () => ({ model: ['real'] }) };
+  const sidebar = { emitter: new EventEmitter(), async start() {}, close() {}, getState: () => ({ model: { projects: [{ label: 'real', sessions: [{ id: 'real', isLive: true }] }] } }) };
   const artifacts = { async list() { return { ok: true, artifacts: [] }; }, isServable() { return false; } };
   const icons = { async list() { return { dir, icons: {} }; }, watch() {}, async filePathFor() { return null; }, mimeFor() { return null; } };
   const tasks = { read: async () => ({}), mutate: async () => ({}), subscribe() {}, close() {} };
   const composed = await composeServer({ userDataDir: dir, env: { ...process.env, HARBOR_NO_DAEMON_START: '1', HARBOR_TAILNET_LOGINS: 'none', HARBOR_SESSIOND_DIR: path.join(dir, 'sessiond') }, sidebar, artifacts, icons, tasks });
   const address = await composed.listen({ host: '127.0.0.1', port: 0 }); t.after(() => composed.close());
   const url = `ws://127.0.0.1:${address.port}/ws`;
-  assert.deepEqual((await call(url, 'sidebar:get-state')).result, { model: ['real'] });
+  // The phone projection (phone-rail.js, 2026-10-11) reshapes the state; the
+  // transport must still deliver exactly what the handler produced.
+  const served = (await call(url, 'sidebar:get-state')).result;
+  assert.deepEqual(served.model.projects, [{ label: 'real', sessions: [{ id: 'real', isLive: true }], sessionCount: 1 }]);
+  assert.equal(served.phone.totalRows, 1);
   assert.match((await call(url, 'session:send', { text: 'danger' })).error, /authentication required.*session:send/);
   assert.match((await call(`${url}?token=${composed.token}`, 'window:minimize')).error, /window:minimize.*local-only/);
 });

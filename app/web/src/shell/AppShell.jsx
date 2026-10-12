@@ -1,3 +1,4 @@
+import { subSessionReadOnly } from '../../../src/shared/sub-sessions.js';
 import { runStateCue } from '../../../src/shared/session-run-state.cjs';
 import React, {
   useCallback, useEffect, useMemo, useRef, useState,
@@ -26,6 +27,7 @@ import { useNotes } from '../notes/useNotes.js';
 import { buildBrowserRows } from '../browse/rows.js';
 import { useVisualViewport } from './use-visual-viewport.js';
 import { prettyModelId } from './model-label.js';
+import { SessionMeta } from './SessionMeta.jsx';
 import { ErrorBoundary } from '../../../src/renderer/ErrorBoundary.jsx';
 import './shell.css';
 
@@ -98,7 +100,7 @@ function SessionScreen({
 }) {
   const asks = useHookAsks(client);
   const pendingAsk = asks.find(ask => ask.sessionId === session?.id && !ask.answered);
-  const { blocks, header, missing, loading } = useTranscript(client, session?.id);
+  const { blocks, header, missing, loading, stale } = useTranscript(client, session?.id);
   // MEMOIZED ON THE IDS, NOT REBUILT PER RENDER. AskCard's poll effect takes
   // this object as a dependency, so a fresh identity on every render tore that
   // effect down and re-ran it, and its first act is an immediate
@@ -113,7 +115,16 @@ function SessionScreen({
     [paneId, workspaceId],
   );
 
-  useEffect(() => { onHeader?.(header || null); }, [header, onHeader]);
+  // The header row's live meter times the task from its prompt, as the
+  // desktop window header does, so the last real prompt rides up with it.
+  const lastPrompt = useMemo(() => {
+    for (let i = blocks.length - 1; i >= 0; i -= 1) {
+      const block = blocks[i];
+      if (block.kind === 'user' && !block.queued) return { ts: block.ts || null, turnMeta: block.turnMeta || null };
+    }
+    return null;
+  }, [blocks]);
+  useEffect(() => { onHeader?.(header ? { ...header, lastPrompt, stale: Boolean(stale) } : null); }, [header, lastPrompt, stale, onHeader]);
 
   if (!session) {
     return (
@@ -144,13 +155,13 @@ function SessionScreen({
         provider={session.provider || 'claude'}
         empty={empty}
       />
-      {pane && !session.isChildTask && !session.delegatedBy && session.provider === 'claude' ? (
+      {pane && !subSessionReadOnly(session) && session.provider === 'claude' ? (
         pendingAsk ? <HookPrompt client={client} ask={pendingAsk} /> : <AskCard client={client} pane={pane} sessionId={session.id} blockedHint={blockedHint} />
       ) : null}
       <Composer
         sessionId={session.id}
         paneId={session.paneId}
-        disabled={Boolean(session.isChildTask || session.delegatedBy)}
+        disabled={subSessionReadOnly(session)}
         working={Boolean(header?.working)}
         onSent={() => {}}
       />
@@ -172,7 +183,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
   const [view, setView] = useState('chat');
 
   const [client, setClient] = useState(null);
-  const { model, loadError, refresh: refreshSidebar, applyPush: applySidebarPush } = useSidebar(client);
+  const { model, loadError, refresh: refreshSidebar, applyPush: applySidebarPush, fetchSlice } = useSidebar(client);
   const { iconUrl, refresh: refreshIcons } = useProjectIcons(client, settings.serverUrl);
   const { activeId, openSession } = useOpenSessions();
 
@@ -260,6 +271,18 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
     ? 'high'
     : /sonnet/i.test(modelIdentity) ? 'medium' : 'low';
   const disconnected = connection !== CONNECTION.connected;
+  // A drop is routine on a phone (iOS closes a backgrounded app's socket) and
+  // the client now reconnects the moment the app is visible again, so the first
+  // seconds of one show a small "Reconnecting" pill over the content you were
+  // reading. Only a drop that lasts says "Cannot reach harbor-server".
+  const [offlineLong, setOfflineLong] = useState(false);
+  useEffect(() => {
+    if (!disconnected) { setOfflineLong(false); return undefined; }
+    const timer = setTimeout(() => setOfflineLong(true), 5000);
+    return () => clearTimeout(timer);
+  }, [disconnected]);
+  const hasCachedRail = Boolean(model?.projects?.length);
+  const activePane = activeSession?.paneId ? { paneId: activeSession.paneId, workspaceId: activeSession.workspaceId || null } : null;
 
   const browserRows = useMemo(
     () => buildBrowserRows(model, { iconUrl }),
@@ -285,7 +308,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                   onOpenBrowse={openBrowse}
                 /> : <ViewHeader view={view} />}
                 {view === 'chat' && activeSession ? <div className="hdr-cap-actions">
-                  <button type="button" disabled={Boolean(activeSession?.isChildTask || activeSession?.delegatedBy)} className={`hdr-model-chip tier-${modelTier} effort-${visibleEffort || 'default'}`} onClick={() => setCapabilityOpen(true)} aria-label={`Model ${visibleModel}${visibleEffort ? `, effort ${visibleEffort}` : ''}`}>{compactModel}{visibleEffort ? ` · ${visibleEffort}` : ''}</button>
+                  <button type="button" disabled={subSessionReadOnly(activeSession)} className={`hdr-model-chip tier-${modelTier} effort-${visibleEffort || 'default'}`} onClick={() => setCapabilityOpen(true)} aria-label={`Model ${visibleModel}${visibleEffort ? `, effort ${visibleEffort}` : ''}`}>{compactModel}{visibleEffort ? ` · ${visibleEffort}` : ''}</button>
                   <button type="button" className="hdr-plan-chip" onClick={() => setPlanOpen(true)} aria-label="Plan and usage" title={planLabel(activeSession)}>{planLabel(activeSession)}</button>
                 </div> : null}
                 <button
@@ -313,7 +336,16 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                   something that is true almost always; the shell carries it as
                   a data attribute for anything that needs to read it, and the
                   banner appears only when there is something to say. */}
-              {disconnected ? (
+              {view === 'chat' && activeSession ? (
+                <SessionMeta client={client} session={activeSession} header={activeHeader} pane={activePane} />
+              ) : null}
+              {disconnected && !offlineLong ? (
+                <div className="connection-banner reconnecting" role="status">
+                  <span className="connection-dot" aria-hidden="true" />
+                  <span>Reconnecting…</span>
+                </div>
+              ) : null}
+              {disconnected && offlineLong ? (
                 <div className="connection-banner offline" role="status">
                   <span className="connection-dot" aria-hidden="true" />
                   <span>{connectionLabel(connection, connectionError)}</span>
@@ -322,7 +354,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
             </header>
 
             <main className="app-main">
-              {disconnected ? (
+              {disconnected && offlineLong ? (
                 <div className="offline-panel" role="alert">
                   <p>Cannot reach harbor-server.</p>
                   <p className="offline-detail">
@@ -336,7 +368,13 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
               {loadError ? <div className="load-error" role="alert">{loadError}</div> : null}
 
               <ErrorBoundary key={view === 'chat' ? `chat:${activeId || ''}` : view} name={view === 'tasks' ? 'Tasks' : view === 'notes' ? 'Notes' : 'Session'}>
-              {view === 'chat' ? <SessionScreen
+              {/* The cached list (local-cache.js) can name a session on the very
+                  first render, before the effect above has created the RPC
+                  client; the composer's useRpc() would throw, and the error
+                  boundary would hold that error after the client arrives
+                  (caught in the 2026-10-11 cold-boot screenshot). The client
+                  exists one effect later, so waiting for it costs nothing. */}
+              {view === 'chat' && client ? <SessionScreen
                 client={client}
                 session={activeSession}
                 onOpenBrowse={openBrowse}
@@ -350,7 +388,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
             <BottomNav active={view} onSelect={setView} />
         </>
 
-        {browseOpen && !disconnected ? (
+        {browseOpen && (!disconnected || hasCachedRail) ? (
           <div className="shell-drawer-layer">
             <button type="button" className="shell-drawer-backdrop" onClick={closeBrowse} aria-label="Close sessions" />
             <div className="shell-drawer">
@@ -362,6 +400,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                 onPick={(session) => openSession(session.id)}
                 onClose={closeBrowse}
                 onNewSession={() => setNewSessionOpen(true)}
+                fetchSlice={fetchSlice}
               />
             </div>
           </div>
@@ -387,7 +426,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
           onRequestSetup={onRequestSetup}
           onSignOut={onSignOut}
         />
-        <CapabilitySheet open={capabilityOpen && !activeSession?.isChildTask && !activeSession?.delegatedBy} onClose={() => setCapabilityOpen(false)} client={client} session={activeSession} header={activeHeader} onApplied={({ model: nextModel, effort: nextEffort }) => setActiveHeader((current) => ({ ...(current || {}), ...(nextEffort ? { effort: nextEffort } : {}), ...(nextModel ? { model: { id: nextModel, label: nextModel } } : {}) }))} />
+        <CapabilitySheet open={capabilityOpen && !subSessionReadOnly(activeSession)} onClose={() => setCapabilityOpen(false)} client={client} session={activeSession} header={activeHeader} onApplied={({ model: nextModel, effort: nextEffort }) => setActiveHeader((current) => ({ ...(current || {}), ...(nextEffort ? { effort: nextEffort } : {}), ...(nextModel ? { model: { id: nextModel, label: nextModel } } : {}) }))} />
         <PlanSheet open={planOpen} onClose={() => setPlanOpen(false)} client={client} session={activeSession} />
       </div>
     </RpcProvider>

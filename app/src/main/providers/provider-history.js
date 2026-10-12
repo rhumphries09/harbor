@@ -68,9 +68,10 @@ function oneLine(text, max = TITLE_MAX) {
 }
 
 // The persisted facts are only as good as the code that read them, so their
-// format IS that code: a hash of every module extractRowFacts runs. Any change
-// to the parser, the title rule or the rollout-meta reader rebuilds the cache
-// on the next launch by itself; nobody has to remember to bump a number.
+// format IS that code: a hash of every module extractRowFacts runs. Known
+// compatible releases migrate their changed fields after the window opens;
+// other reader fingerprints refresh bounded heads in the background. A foreign
+// envelope that is not a reader fingerprint is never trusted.
 const FACTS_FORMAT = (() => {
   const hash = require('node:crypto').createHash('sha1');
   for (const file of [__filename, './transcript.js', './session-title.cjs', './provider-session-link.js', '../../shared/claude-turn-state.cjs']) {
@@ -78,6 +79,9 @@ const FACTS_FORMAT = (() => {
   }
   return hash.digest('hex').slice(0, 16);
 })();
+// These releases differ only in Codex lineage classification. Keep their
+// prompt facts at boot and upgrade the metadata in bounded background batches.
+const COMPATIBLE_FACTS = new Set(['e823c78fa0869b94', 'f3de39fcfce83c81', 'a7655fd77549f45b', '574fa962fc2a884d']);
 // A first prompt can be a whole pasted document, and every reader of it goes
 // through oneLine with a max of at most 400, so the stored copy is collapsed
 // and clipped well past that: oneLine(stored, max) === oneLine(original, max)
@@ -160,12 +164,17 @@ function createProviderHistory(options = {}) {
   const factsCacheFile = options.factsCacheFile || null;
   let storedFacts = null; // file path -> { size, mtimeMs, facts }
   let storedFactsDirty = false;
+  const pendingMigration = new Map();
+  let migrationTimer = null; let migrationClosed = false;
   const loadStoredFacts = () => {
     if (storedFacts || !factsCacheFile) return storedFacts;
     storedFacts = {};
     try {
       const parsed = JSON.parse(fs.readFileSync(factsCacheFile, 'utf8'));
-      if (parsed?.format === FACTS_FORMAT && parsed.files && typeof parsed.files === 'object') storedFacts = parsed.files;
+      if (/^[a-f0-9]{16}$/.test(parsed?.format) && parsed.files && typeof parsed.files === 'object') {
+        storedFacts = parsed.files;
+        for (const entry of Object.values(storedFacts)) entry.format ||= parsed.format;
+      }
     } catch { /* first launch, or an unreadable cache: the scan rebuilds it */ }
     return storedFacts;
   };
@@ -266,11 +275,12 @@ function createProviderHistory(options = {}) {
     const stored = loadStoredFacts()?.[file];
     if (stored && stored.size === stat.size && stored.mtimeMs === stat.mtimeMs) {
       facts = stored.facts;
+      if (stored.format && stored.format !== FACTS_FORMAT) pendingMigration.set(file, provider);
     } else {
       try {
         facts = await extractRowFacts(file, provider);
         if (storedFacts) {
-          storedFacts[file] = { size: stat.size, mtimeMs: stat.mtimeMs, facts: storableFacts(facts) };
+          storedFacts[file] = { size: stat.size, mtimeMs: stat.mtimeMs, facts: storableFacts(facts), format: FACTS_FORMAT };
           storedFactsDirty = true;
         }
       } catch { /* unreadable head; row still lists, and the next scan retries */ }
@@ -404,14 +414,51 @@ function createProviderHistory(options = {}) {
     watchDir(cursorRoot, { recursive: true });
   };
 
+  const migrateEntries = async (limit = 8) => {
+    let changed = 0; let attempted = 0;
+    for (const [file, provider] of pendingMigration) {
+      if (attempted++ >= limit) break;
+      pendingMigration.delete(file);
+      const stored = storedFacts?.[file]; if (!stored) continue;
+      try {
+        if (!COMPATIBLE_FACTS.has(stored.format)) {
+          // Other reader fingerprints (including mixed checkout line endings)
+          // refresh the whole head, but only after boot and one batch at a time.
+          stored.facts = storableFacts(await extractRowFacts(file, provider));
+        } else if (provider === 'codex') {
+          const meta = await readCodexRolloutMeta(file);
+          stored.facts.lineage = meta?.lineage || null;
+          stored.facts.isInternalSession = meta?.lineage?.kind === 'guardian';
+        }
+        stored.format = FACTS_FORMAT; storedFactsDirty = true; cache.delete(file); changed++;
+      } catch { /* unreadable metadata remains unknown until the file changes */ }
+    }
+    if (!pendingMigration.size) await saveStoredFacts(new Set(Object.keys(storedFacts || {})));
+    return { changed, remaining: pendingMigration.size };
+  };
+  const startBackgroundMigration = () => {
+    if (migrationClosed || migrationTimer) return;
+    let changed = false;
+    const step = async () => {
+      try {
+        const result = await migrateEntries();
+        changed ||= result.changed > 0;
+        if (migrationClosed) return;
+        if (result.remaining) migrationTimer = setTimeout(step, 100);
+        else { migrationTimer = null; if (changed) emitter.emit('changed'); }
+      } catch { migrationTimer = null; }
+    };
+    migrationTimer = setTimeout(step, 0);
+  };
   const close = () => {
+    migrationClosed = true; clearTimeout(migrationTimer);
     clearTimeout(changedTimer);
     for (const watcher of watchers) watcher.close();
     watchers.length = 0;
   };
 
   return {
-    emitter, listSessions, metaFor, start, close,
+    emitter, listSessions, metaFor, start, close, migrateEntries, startBackgroundMigration,
     rememberKeeperIdentity,
     rememberLink: rememberKeeperIdentity,
   };

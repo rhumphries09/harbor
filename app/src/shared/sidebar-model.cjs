@@ -1,5 +1,6 @@
 'use strict';
 
+const { isSubSession } = require('./sub-sessions.cjs');
 const {
   parseLocalDateTime,
   cutoffForFilter,
@@ -227,6 +228,7 @@ function groupSessions(sessions, grouping, now) {
 }
 
 function regroupSidebarModel(model, { grouping = 'project', now = new Date() } = {}) {
+  if (grouping === 'project' && model.grouping === 'project') return model;
   const sessions = (model.projects || []).flatMap((project) => project.sessions || []);
   return {
     ...model,
@@ -265,6 +267,7 @@ function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = 
       provider: paneProvider(pane),
       model: pane.model || pane.metadata?.tokens?.model || null,
       agentStatus: pane.agent_status || null,
+      isLiveInteractive: pane.isLiveInteractive === true,
       title: pane.terminal_title || pane.label || 'Live session',
       lastActiveMs: currentTime.getTime(),
       lastActive: currentTime.toISOString(),
@@ -305,12 +308,15 @@ function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = 
       provider: row.provider || 'claude',
       model: row.model || live?.model || null,
       isLive: Boolean(live),
+      isLiveInteractive: live?.isLiveInteractive === true,
       dormant: !live && sleptSince(dormantSessions?.[row.id], lastActiveMs),
       paneId: live?.paneId ?? null,
       workspaceId: live?.workspaceId ?? null,
       agentStatus: live?.agentStatus ?? null,
       isWindowsEra: isWindowsEra(row.project),
       isInternalSession: Boolean(row.isInternalSession),
+      entrypoint: row.entrypoint || null,
+      isSubSession: isSubSession(row),
       isChildTask: isChildTask(row.title),
       childTitle: isChildTask(row.title) ? childTaskTitle(row.title) : null,
       cwd: resolvableCwd(row.cwd),
@@ -364,7 +370,7 @@ function filterProjects(model, { filter, query, now } = {}) {
       // rather than per project so it behaves the same under date grouping,
       // where a group holds several projects; a project left with no sessions is
       // already dropped below.
-      if (!needle && (isScratchSession(session) || session.isInternalSession)) return false;
+      if (!needle && (isScratchSession(session) || (session.isInternalSession && !session.isLive))) return false;
       if (!needle) return true;
       if (projectMatches) return true;
       return `${session.project}\n${session.title}\n${session.firstPrompt || ''}`.toLowerCase().includes(needle);
@@ -462,4 +468,5 @@ module.exports = {
   projectRootSessionId,
   sessionAgentId,
   paneProvider,
+  sleptSince,
 };

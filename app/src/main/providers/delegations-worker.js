@@ -22,6 +22,10 @@ const FOLD_FORMAT = (() => {
   }
   return hash.digest('hex').slice(0, 16);
 })();
+// These releases used the identical fold/scanner; only worker IPC changed.
+// Include LF/CRLF checkout combinations. Retire these aliases if fold rules change.
+const COMPATIBLE_FOLDS = new Set(['da8a47743f347015', 'b7d5c8c82fa4a0d8', '3bacf1adab371f28', 'b6ab383315834542',
+  '772090574c4aa232', '095de10019fae719', 'fa5791d81001f1bc', '98053b8e3ca2e151']);
 
 function createScanner() {
   const files = new Map();
@@ -77,7 +81,7 @@ function createScanner() {
   scan.load = (cacheFile) => {
     try {
       const parsed = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-      if (parsed?.format !== FOLD_FORMAT || !parsed.files || typeof parsed.files !== 'object') return;
+      if ((parsed?.format !== FOLD_FORMAT && !COMPATIBLE_FOLDS.has(parsed?.format)) || !parsed.files || typeof parsed.files !== 'object') return;
       for (const [file, entry] of Object.entries(parsed.files)) {
         if (entry && Number.isFinite(entry.offset) && entry.state && entry.signal) files.set(file, entry);
       }
@@ -156,11 +160,18 @@ async function scanRows(rows, liveIds = [], now = Date.now(), ownerOptions) {
   const built = buildDelegationGroups(parents, providers, now, links);
   return { parents, providers, built };
 }
-if (parentPort) parentPort.on('message', async ({ rows, liveIds, ownerOptions, cacheFile }) => {
+let residentRows = []; let residentById = new Map();
+if (parentPort) parentPort.on('message', async ({ rows, linkUpdates, liveIds, ownerOptions, cacheFile }) => {
   try {
+    if (rows) { residentRows = rows; residentById = new Map(rows.map((row) => [row.id, row])); }
+    for (const [id, parent] of Object.entries(linkUpdates || {})) {
+      const row = residentById.get(id); if (row) row.delegatedBy = row.lineage?.parentThreadId || parent || null;
+    }
     if (cacheFile && loadedCacheFile !== cacheFile) { scan.load(cacheFile); loadedCacheFile = cacheFile; }
-    const result = await scanRows(rows, liveIds, Date.now(), ownerOptions);
-    parentPort.postMessage(result);
+    const result = await scanRows(residentRows, liveIds, Date.now(), ownerOptions);
+    // Providers are the resident input, not a result. Returning them cloned
+    // every historical rollout back into main on every idle notification.
+    parentPort.postMessage({ parents: result.parents.map(({ id, background, ownerEvidence }) => ({ id, background, ownerEvidence })), built: result.built });
     if (cacheFile) await scan.save(cacheFile);
     else scan.endPass();
   } catch (error) { parentPort.postMessage({ error: error.message }); }

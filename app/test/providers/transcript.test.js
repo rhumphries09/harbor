@@ -1004,8 +1004,16 @@ test('provider recovers an image before the initial tail window without parsing 
 
   writeLines(file, [userLine('new live tail')]);
   assert.equal(await waitFor(() => updates.slice(1).some((update) =>
-    update.replace?.some((block) => block.text === 'new live tail'))), true,
-  'image-preserving non-front trim must replace the renderer window');
+    update.append?.some((block) => block.text === 'new live tail'))), true,
+  'image-preserving non-front trim must append without resending retained images');
+  const delta = updates.slice(1).find((update) => update.append?.some((block) => block.text === 'new live tail'));
+  assert.ok(delta.removed.length > 0, 'evictions are explicit keys');
+  assert.equal(delta.replace, undefined);
+  assert.ok(JSON.stringify(delta).length < 10000);
+  const { applyTranscriptUpdate } = require('../../src/shared/transcript-blocks.cjs');
+  const final = updates.slice(1).reduce(applyTranscriptUpdate, initial);
+  assert.ok(final.some((block) => block.text === 'new live tail'));
+  assert.equal(final.find((block) => block.images?.length), initial.find((block) => block.images?.length));
   provider.closeAll();
   await fsp.rm(dir, { recursive: true, force: true });
 });

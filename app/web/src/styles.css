@@ -460,6 +460,20 @@ input {
   color: var(--fnt);
 }
 
+.session-ctx {
+  flex: 0 0 auto;
+  color: var(--sub);
+  font-variant-numeric: tabular-nums;
+}
+.session-ctx.warn { color: var(--warn); }
+
+.session-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-badge {
   flex: 0 0 auto;
   padding: 4px 9px;

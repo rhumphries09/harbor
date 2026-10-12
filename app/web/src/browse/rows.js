@@ -63,6 +63,35 @@ export function saveCollapsedProjects(collapsed) {
   }
 }
 
+// A slice fetched for a wider window or a search, overlaid with the pushed
+// projection: the pushed row wins for any id both carry (it has the live
+// status), and pushed rows the slice lacks are added (a search's own query
+// filter still applies to them downstream). Slice project order first.
+export function mergeRailModels(base, overlay) {
+  const baseProjects = base?.projects || [];
+  const overlayProjects = overlay?.projects || [];
+  if (!overlayProjects.length) return base || { projects: [] };
+  const fresh = new Map();
+  for (const project of overlayProjects) for (const session of project.sessions || []) fresh.set(session.id, session);
+  const seen = new Set();
+  const byLabel = new Map();
+  const projects = [];
+  for (const project of baseProjects) {
+    const sessions = (project.sessions || []).map((s) => { seen.add(s.id); return fresh.get(s.id) || s; });
+    const merged = { ...project, sessions };
+    byLabel.set(project.label, merged);
+    projects.push(merged);
+  }
+  for (const project of overlayProjects) {
+    const extra = (project.sessions || []).filter((s) => !seen.has(s.id));
+    if (!extra.length) continue;
+    const into = byLabel.get(project.label);
+    if (into) into.sessions = [...into.sessions, ...extra];
+    else { const added = { ...project, sessions: extra }; byLabel.set(project.label, added); projects.push(added); }
+  }
+  return { ...(base || {}), projects };
+}
+
 export function filterMatches(a, b) {
   if (!a || !b) return false;
   if (a.kind !== b.kind) return false;
@@ -128,7 +157,7 @@ function collectBlockedSessions(model) {
   const pinned = [];
   for (const project of model?.projects || []) {
     for (const session of project.sessions || []) {
-      if (needsAnswer(session) && (session.isLive || (!session.isChildTask && !session.delegatedBy))) {
+      if (needsAnswer(session) && (session.isLive || (!session.isSubSession && !session.isChildTask && !session.delegatedBy))) {
         pinned.push({ project, session });
       }
     }

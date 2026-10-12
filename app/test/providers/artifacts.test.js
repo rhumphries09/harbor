@@ -213,6 +213,7 @@ test('provider lists produced files, drops read-only mentions and dead paths, se
   const provider = createArtifactsProvider({
     roots: [projectsRoot],
     cacheFile: path.join(tmp, 'cache.json'),
+    getSessionLabel: (id) => { assert.equal(id, 'sess-abc'); return { title: 'Synthetic headless report', project: 'Sample project' }; },
   });
   const { ok, artifacts } = await provider.list();
   assert.equal(ok, true);
@@ -220,6 +221,8 @@ test('provider lists produced files, drops read-only mentions and dead paths, se
   assert.equal(artifacts[0].kind, 'html');
   assert.equal(artifacts[0].sessionId, 'sess-abc');
   assert.equal(artifacts[0].cwd, '/home/you/dev/demo');
+  assert.equal(artifacts[0].sessionTitle, 'Synthetic headless report', 'Files retain source labels without a rail row');
+  assert.equal(artifacts[0].sessionProject, 'Sample project');
 
   // Serve allowlist: the artifact, its sibling assets, nothing else.
   assert.equal(provider.isServable(produced), true);

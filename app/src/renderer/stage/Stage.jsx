@@ -1,3 +1,4 @@
+import { subSessionReadOnly } from '../../shared/sub-sessions.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { SessionTile } from './SessionTile.jsx';
 import { ErrorBoundary } from '../ErrorBoundary.jsx';
@@ -124,7 +125,7 @@ export function Stage({
   const selected = sessionsById.get(selectedId) || null;
   const selectedPane = selected ? resolvePane(selected) : null;
   const selectedHeader = selected ? transcripts.get(selected.id)?.header || null : null;
-  const selectedReadOnly = Boolean(selected?.isChildTask || selected?.delegatedBy);
+  const selectedReadOnly = subSessionReadOnly(selected);
   const selectedExternalLive = selected ? isExternalLive(selected) : false;
 
   // Slot index straight from the grid's geometry. NEVER hit-test the rendered
@@ -331,7 +332,7 @@ export function Stage({
                 attention={attention?.get?.(session.id) || null}
                 index={rank}
                 slot={slot}
-                readOnly={Boolean(session.isChildTask || session.delegatedBy)}
+                readOnly={subSessionReadOnly(session)}
                 tty={Boolean(tile.tty)}
                 focused={focusActive && session.id === focusedId}
                 focusHidden={focusActive && session.id !== focusedId}
@@ -357,7 +358,7 @@ export function Stage({
                   pane,
                   folder: session.cwd,
                   account: session.home,
-                  drivable: Boolean(pane && !session.isChildTask && !session.delegatedBy && !isExternalLive(session) && !externalControl[pane.paneId]),
+                  drivable: Boolean(pane && !subSessionReadOnly(session) && !isExternalLive(session) && !externalControl[pane.paneId]),
                 })}
                 queueSummary={session.cwd ? orchSummaries?.[session.cwd] || null : null}
                 onOpenOrch={() => onOpenOrch(session)}

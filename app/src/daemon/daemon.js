@@ -485,7 +485,7 @@ async function dispatch(socket, record) {
       ? { enabled: true, after_ms: dormancyPolicy.afterMs, watching: dormancyWatch.size }
       : { enabled: false };
     const jobs = jobPolicy.enabled
-      ? { enabled: true, sessions: sessionJobs.size }
+      ? { enabled: true, sessions: sessionJobs.size, processMemoryMax: jobPolicy.processMemoryMax || null }
       : { enabled: false, reason: jobPolicy.reason, sessions: 0 };
     return { ok: true, pid: process.pid, request: randomUUID(), sessions: allStates().length, scopes, jobs, dormancy };
   }
@@ -1175,7 +1175,7 @@ async function start() {
   processIntel.start();
   log(processIntel.available ? 'process intel on: NtQuerySystemInformation snapshot-diff' : `process intel off: ${processIntel.reason}; using PowerShell CIM fallback`);
   log(jobPolicy.enabled
-    ? `session jobs on: namespace=${jobPolicy.namespace || 'default-store'} memory_max=${jobPolicy.memoryMax || 'off'} cpu signal: job accounting with process-table fallback`
+    ? `session jobs on: namespace=${jobPolicy.namespace || 'default-store'} memory_max=${jobPolicy.memoryMax || 'off'} process_memory_max=${jobPolicy.processMemoryMax ? (jobPolicy.processMemoryMax % 1024 ** 3 === 0 ? `${jobPolicy.processMemoryMax / 1024 ** 3}GiB` : `${Math.round(jobPolicy.processMemoryMax / 1024 ** 2)}MiB`) : 'off'} cpu signal: job accounting with process-table fallback`
     : `session jobs off: ${jobPolicy.reason}; Windows sessions use process fallbacks`);
   // Stated once per daemon, because "why did my session close" is answered by
   // this line plus the `dormant <id>` line, and a setting that is never printed

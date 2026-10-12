@@ -4,8 +4,6 @@ const LOCAL_ONLY = new Set([
   // Claude's composer suggestion for the desktop command bar's Tab-to-accept.
   // The phone has no use for it, so it never leaves this machine.
   'session:suggestion',
-  // The window header's live working meter, read off the pane like the above.
-  'session:work-meter',
   // Account usage is shown only in the desktop title bar.
   'usage:get-plans',
   // The heavy-lifting setting beside it decides whether Claude sessions may
@@ -191,11 +189,16 @@ const REMOTE_SAFE = new Set([
   // No install, no config file, no network of their own.
   'cli-updates:get-state', 'cli-updates:notes',
   'terminal:get-state',
-  'orchestration:get-data', 'orchestration:list-runs', 'orchestration:list-delegations', 'orchestration:watch', 'orchestration:unwatch',
+  'orchestration:get-data', 'orchestration:list-runs', 'orchestration:list-delegations', 'orchestration:list-sub-sessions', 'orchestration:get-session', 'orchestration:watch', 'orchestration:unwatch',
   'orchestration:watch-summaries', 'orchestration:unwatch-summaries',
   'orchestration:session-preview', 'perf:stall', 'diag:input',
   'setup:state', 'setup:detect', 'setup:read-home', 'setup:catalog',
   'setup:preview', 'setup:symlink-plan',
+  // The window header's live working meter (tokens and elapsed time Claude's
+  // status line shows mid-turn), parsed off the pane. Read-only and numbers
+  // only; local-only until 2026-10-11, when the phone header began showing it
+  // (Pat: the phone "doesnt show like session context or stuff like that").
+  'session:work-meter',
   // Lists the realtime voice names. Read-only, mints nothing, costs nothing.
   // voice:token and whisper:transcribe are deliberately NOT here: one mints an
   // OpenAI credential and the other spends money, so both are authenticated.
@@ -309,7 +312,7 @@ const METHOD_NAMES = [
   'orchestration:watch-summaries',
   'orchestration:unwatch-summaries',
   'orchestration:list-runs',
-  'orchestration:list-delegations',
+  'orchestration:list-delegations', 'orchestration:list-sub-sessions', 'orchestration:get-session',
   'orchestration:get-data',
   'orchestration:watch',
   'orchestration:unwatch',

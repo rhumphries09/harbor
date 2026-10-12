@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
 import { applyTranscriptUpdate } from '../../../src/shared/transcript-blocks.cjs';
+import { createDebouncedWriter, readCachedTranscript, writeCachedTranscript } from '../rpc/local-cache.js';
+
+// A cached copy (local-cache.js) paints the moment the session opens or the app
+// cold-boots, marked `stale` until the server's own `replace` arrives. While
+// stale, incremental pushes are ignored: they describe the server's list, not
+// the cached one, and the open always answers with a full replace first.
+const cacheWriter = createDebouncedWriter((sessionId, blocks, header) => writeCachedTranscript(sessionId, blocks, header), 1200);
 
 // Opens a session's transcript over the RPC client and keeps it in sync with
 // the server's `transcript:update` pushes (replace/append/changed), the same
@@ -16,7 +23,10 @@ export function useTranscript(client, sessionId) {
       return undefined;
     }
     let cancelled = false;
-    setState({ blocks: [], header: null, missing: false, loading: true });
+    const cached = readCachedTranscript(sessionId);
+    setState(cached
+      ? { blocks: cached.blocks, header: cached.header, missing: false, loading: false, stale: true }
+      : { blocks: [], header: null, missing: false, loading: true });
 
     // A MISS IS NEVER PERMANENT. A brand-new session writes its transcript on its
     // first message, so "not found" means "not yet". The desktop learned this
@@ -79,10 +89,14 @@ export function useTranscript(client, sessionId) {
       if (!payload || payload.sessionId !== sessionId) return;
       setState((prev) => {
         if (Array.isArray(payload.replace)) {
-          return { blocks: payload.replace, header: payload.header || null, missing: false, loading: false };
+          cacheWriter.schedule(sessionId, payload.replace, payload.header || null);
+          return { blocks: payload.replace, header: payload.header || null, missing: false, loading: false, stale: false };
         }
+        if (prev.stale) return prev;
         const blocks = applyTranscriptUpdate(prev.blocks, payload);
-        return { blocks, header: payload.header || prev.header, missing: false, loading: false };
+        const header = payload.header || prev.header;
+        cacheWriter.schedule(sessionId, blocks, header);
+        return { blocks, header, missing: false, loading: false, stale: false };
       });
     });
 

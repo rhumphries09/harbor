@@ -12,6 +12,7 @@ import {
   buildBrowserRows,
   filterMatches,
   loadBrowserPrefs,
+  mergeRailModels,
   loadCollapsedProjects,
   saveBrowserPrefs,
   saveCollapsedProjects,
@@ -42,6 +43,7 @@ export function SessionBrowser({
   onPick,
   onClose,
   onNewSession,
+  fetchSlice: fetchSliceProp,
 }) {
   // AppShell already owns a loaded sidebar model. This component used to open
   // a SECOND useSidebar subscription and fall back to the pre-built `rows`
@@ -52,13 +54,36 @@ export function SessionBrowser({
   // and 31 before and after collapsing a project. Prefer the model handed
   // down; keep the local subscription only as a fallback.
   const client = useOptionalRpc();
-  const { model: ownModel } = useSidebar(client);
-  const model = modelProp?.projects?.length ? modelProp : ownModel;
+  const { model: ownModel, fetchSlice: ownFetchSlice } = useSidebar(client);
+  const liveModel = modelProp?.projects?.length ? modelProp : ownModel;
+  const fetchSlice = fetchSliceProp || ownFetchSlice;
   const { serverUrl } = loadSettings();
   const { iconUrl } = useProjectIcons(client, serverUrl);
 
   const [query, setQuery] = useState('');
   const [prefs, setPrefs] = useState(loadBrowserPrefs);
+
+  // The pushed list is the phone projection (live + 48 h, 2026-10-11). A wider
+  // window or a search asks the server for that slice once; the push's rows
+  // still win for anything both carry, because they hold the live status.
+  const wantsWide = prefs.filter?.kind === 'all' || (prefs.filter?.kind === 'rolling' && Number(prefs.filter.days) > 2);
+  const needle = query.trim();
+  const searching = needle.length >= 2;
+  const [slice, setSlice] = useState(null);
+  useEffect(() => {
+    if (!open || !fetchSlice || (!wantsWide && !searching)) { setSlice(null); return undefined; }
+    const request = searching
+      ? { query: needle, days: 'all', limit: 300 }
+      : { days: prefs.filter.kind === 'all' ? 'all' : Number(prefs.filter.days), limit: 1000 };
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      fetchSlice(request).then((state) => {
+        if (!cancelled && state?.model) setSlice({ model: state.model, truncated: Boolean(state.phone?.truncated), shown: state.phone?.shownRows || 0 });
+      }).catch(() => {});
+    }, searching ? 250 : 0);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [open, fetchSlice, wantsWide, searching, needle, prefs.filter]);
+  const model = useMemo(() => (slice ? mergeRailModels(slice.model, liveModel) : liveModel), [slice, liveModel]);
   const [controlsOpen, setControlsOpen] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState(loadCollapsedProjects);
   const [expandedOlder, setExpandedOlder] = useState(() => new Set());
@@ -226,8 +251,11 @@ export function SessionBrowser({
       <div className="session-browser-list">
         {!hasSessions ? (
           <div className="empty-state">
-            <p>No sessions match.</p>
+            <p>{(wantsWide || searching) && !slice ? 'Loading…' : 'No sessions match.'}</p>
           </div>
+        ) : null}
+        {slice?.truncated ? (
+          <p className="browser-note">Showing the {slice.shown} most recent{searching ? ' matches' : ''}. Search to reach older sessions.</p>
         ) : null}
         {list.map((row) => {
           if (row.kind === 'project') {

@@ -1,3 +1,5 @@
+import { subSessionReadOnly } from '../shared/sub-sessions.js';
+import { useSidebarState } from './sidebar/store.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { replyStore } from './stage/use-question-reply.js';
 import { useModelDialogs } from './stage/use-dialog-state.js';
@@ -232,8 +234,10 @@ function readStoredView() {
 
 function App() {
   const { profiles, defaultProfileId } = useProfiles();
-  const [sidebarModel, setSidebarModel] = useState({ projects: [], liveProjects: [] });
-  const [sidebarModelLoaded, setSidebarModelLoaded] = useState(false);
+  const sidebarState = useSidebarState();
+  const [appTestModel, setAppTestModel] = useState(null);
+  const sidebarModel = appTestModel || sidebarState.model;
+  const sidebarModelLoaded = appTestModel != null || sidebarState.loaded;
   const [view, setViewState] = useState(readStoredView);
   const [stageLayout, setStageLayout] = useState(readStoredStageLayout);
   const toggleStageLayout = useCallback(() => {
@@ -252,6 +256,7 @@ function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [links, setLinks] = useState({});
   const [stage, setStage] = useState(restoreTiles);
+  const [orchSessions, setOrchSessions] = useState(() => new Map());
   const [transcripts, setTranscripts] = useState(() => new Map());
   const [sendStates, setSendStates] = useState(() => new Map());
   const [configRequest, setConfigRequest] = useState(null);
@@ -395,8 +400,7 @@ function App() {
         pinnedTestModelRef.current = model != null;
         // null releases the pin and restores reality, so a fabrication cannot
         // leak a stale model into every scenario that runs after it.
-        if (model != null) setSidebarModel(model);
-        else window.harbor.sidebar.getState().then((state) => setSidebarModel(state.model)).catch(() => {});
+        setAppTestModel(model);
       };
       window.__setTranscriptForTest = (sessionId, data) => {
         setTranscripts((prev) => {
@@ -416,21 +420,6 @@ function App() {
       delete window.__setTranscriptForTest;
     };
   }, [openOrch]);
-
-  useEffect(() => {
-    window.harbor.sidebar.getState().then((state) => {
-      if (!pinnedTestModelRef.current) {
-        setSidebarModel(state.model);
-        setSidebarModelLoaded(true);
-      }
-    }).catch(() => setSidebarModelLoaded(true));
-    return window.harbor.sidebar.onUpdate((state) => {
-      if (!pinnedTestModelRef.current) {
-        setSidebarModel(state.model);
-        setSidebarModelLoaded(true);
-      }
-    });
-  }, []);
 
   useEffect(() => {
     window.harbor.links.get().then(setLinks).catch(() => {});
@@ -457,12 +446,32 @@ function App() {
   // Every session by id, workers included: tiles resolve their session facts
   // (title, project, account, live pane) straight from the sidebar model.
   const sessionsById = useMemo(() => {
-    const map = new Map();
+    const map = new Map(orchSessions);
     for (const project of sidebarModel.projects || []) {
       for (const session of project.sessions || []) map.set(session.id, session);
     }
     return map;
-  }, [sidebarModel]);
+  }, [sidebarModel, orchSessions]);
+
+  // Opened sub-sessions are fetched individually, never smuggled back into
+  // rail history. Restored windows recover the same way after a reload.
+  const missingRailSessions = useMemo(() => {
+    const railIds = new Set(sidebarModel.projects.flatMap((p) => p.sessions.map((s) => s.id)));
+    return stage.tiles.map((tile) => tile.sessionId).filter((id) => !railIds.has(id)).join('\n');
+  }, [stage.tiles, sidebarModel]);
+  useEffect(() => {
+    let active = true;
+    const wanted = missingRailSessions ? missingRailSessions.split('\n') : [];
+    const refresh = () => Promise.all(wanted.map(async (sessionId) => {
+      const row = await window.harbor.orchestration.getSession?.(sessionId).catch(() => null);
+      if (active && row) setOrchSessions((previous) => new Map(previous).set(row.id, row));
+    }));
+    refresh();
+    const timer = setInterval(refresh, 15000);
+    return () => { active = false; clearInterval(timer); };
+  }, [missingRailSessions]);
+
+
 
   // ---- the stage the app operates on, resolved from the persisted store ----
   // A tile is resolvable when the model names its session, or when it is a
@@ -917,7 +926,7 @@ function App() {
         isSelected: id === selectedId,
         // Orchestration workers and BATCH TITLE children finish all day; they
         // are not waiting for Pat, and counting them pinned the badge at 9+.
-        excluded: Boolean(session.isChildTask || session.delegatedBy)
+        excluded: subSessionReadOnly(session)
           || isOrchestrationCwd({ cwd: session.cwd, label: session.project }),
       };
       descriptors.push(descriptor);
@@ -1544,6 +1553,13 @@ function App() {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [tiles, selectTile, view, selectedId, stageLayout]);
 
+  const openOrchSession = useCallback(async (id) => {
+    const row = sessionsById.get(id) || await window.harbor.orchestration.getSession?.(id);
+    if (!row) return;
+    setOrchSessions((previous) => new Map(previous).set(id, row));
+    openSession(row);
+  }, [sessionsById, openSession]);
+
   // ---- title bar data ----
   const liveSessions = useMemo(() => {
     const list = [];
@@ -1554,7 +1570,7 @@ function App() {
     }
     return list;
   }, [sidebarModel]);
-  const liveCount = liveSessions.filter((s) => !s.isChildTask && !s.delegatedBy).length;
+  const liveCount = liveSessions.filter((s) => !subSessionReadOnly(s)).length;
   const workers = liveSessions.filter((s) => s.isChildTask && s.paneId);
   const openSessionIds = useMemo(() => new Set(tiles.map((t) => t.sessionId)), [tiles]);
   const selectedDraft = selectedId ? getDraft(selectedId) : emptyDraft();
@@ -1652,7 +1668,7 @@ function App() {
                   onClose={() => { setOrchProject(null); setView('agents'); }}
                 />
               ) : (
-                <OrchLiveRuns projects={sidebarModel.projects} onPick={setOrchProject} focusParentId={delegationFocus} onOpenSession={(id) => { const session = sessionsWithSynthetic.get(id); if (session) openSession(session); }} />
+                <OrchLiveRuns projects={sidebarModel.projects} onPick={setOrchProject} focusParentId={delegationFocus} onOpenSession={openOrchSession} />
               )
             ) : view === 'tasks' ? (
               <TasksView

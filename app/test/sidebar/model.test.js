@@ -242,6 +242,7 @@ test('date groups retain the 12-session older expander independently per day', (
 test('ESM and CommonJS sidebar model twins have identical logic bodies', () => {
   const shared = path.resolve(__dirname, '../../src/shared');
   const esm = fs.readFileSync(path.join(shared, 'sidebar-model.js'), 'utf8')
+    .replace("import { isSubSession } from './sub-sessions.js';", "const { isSubSession } = require('./sub-sessions.cjs');")
     .replace(/import \{([\s\S]*?)\} from '\.\/date-roll\.js';/, "const {$1} = require('./date-roll.cjs');")
     .replace(/export const /g, 'const ')
     .replace(/export function /g, 'function ')

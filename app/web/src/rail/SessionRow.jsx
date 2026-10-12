@@ -2,6 +2,7 @@ import { runStateCue } from '../../../src/shared/session-run-state.cjs';
 import React from 'react';
 import { ProjectIcon } from './ProjectIcon.jsx';
 import { formatRelative } from './format.js';
+import { prettyModelId } from '../shell/model-label.js';
 
 export function SessionRow({
   row, selected, onSelect, iconUrl, showProject = false,
@@ -39,6 +40,14 @@ export function SessionRow({
             <span className="session-project">{session.subproject}</span>
           ) : null}
           <span className="session-time">{formatRelative(session.lastActiveMs)}</span>
+          {/* Live rows only (2026-10-11): how full the context is, from the
+              server's statusline-tee stamp (never a guess), and the model. */}
+          {session.isLive && typeof session.contextPct === 'number' ? (
+            <span className={`session-ctx${session.contextPct >= 70 ? ' warn' : ''}`}>{session.contextPct}% context</span>
+          ) : null}
+          {session.isLive && session.model && session.model !== 'default' ? (
+            <span className="session-model">{prettyModelId(session.model) || session.model}</span>
+          ) : null}
         </span>
       </span>
       {needsAnswer ? <span className="session-badge">Answer</span> : null}

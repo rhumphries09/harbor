@@ -7,6 +7,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { applyTranscriptUpdate } = require('../../src/shared/transcript-blocks.cjs');
 
+test('sliding transcript windows remove by key and retain image identity', () => {
+  const image = { key: 'b0', kind: 'user', images: [{ dataUri: 'synthetic'.repeat(10000) }] };
+  const old = { key: 'b1', text: 'old' };
+  const next = applyTranscriptUpdate([image, old], { removed: ['b1'], append: [{ key: 'b2', text: 'new' }] });
+  assert.equal(next[0], image);
+  assert.deepEqual(next.map((b) => b.key), ['b0', 'b2']);
+});
+
 const block = (key, text) => ({ key, kind: 'user', text });
 
 test('an append whose block is already shown updates it instead of drawing it twice', () => {

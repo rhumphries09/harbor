@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { OrchProjectPicker } from './OrchProjectPicker.jsx';
 import { Delegations } from './Delegations.jsx';
+import { SubSessions } from './SubSessions.jsx';
 import { createSingleFlight } from '../../shared/single-flight.js';
 
 function ageText(ms) {
@@ -31,8 +32,7 @@ export function OrchLiveRuns({ projects, onPick, focusParentId, onOpenSession })
       .then(([rows]) => { if (active) { setRuns(rows || []); setError(null); } }).catch(fail));
     load();
     const timer = setInterval(load, 30_000);
-    const unsubscribe = window.harbor.sidebar?.onUpdate?.(loadDelegations);
-    return () => { active = false; clearInterval(timer); unsubscribe?.(); };
+    return () => { active = false; clearInterval(timer); };
   }, []);
 
   return (
@@ -43,6 +43,7 @@ export function OrchLiveRuns({ projects, onPick, focusParentId, onOpenSession })
       </div>
       {error ? <div className="orch-error-banner">{error}</div> : null}
       <Delegations groups={delegations} focusParentId={focusParentId} onOpenSession={onOpenSession} />
+      <SubSessions onOpenSession={onOpenSession} />
       {runs === null ? <p className="orch-loading">Loading...</p> : null}
       {runs?.length === 0 && !delegations.some((group) => group.visible) ? <p className="orch-picker-empty">No live or recently finished runs.</p> : null}
       <div className="orch-run-list">

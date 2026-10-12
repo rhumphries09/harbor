@@ -80,6 +80,28 @@ const blankPrefix = (file, length) => {
   fs.closeSync(fd);
 };
 
+test('the previous release facts and fold caches remain usable before background migration', async (t) => {
+  const dir = tmp(t, 'harbor-compatible-cache-'); const codexRoot = path.join(dir, 'codex');
+  const day = path.join(codexRoot, '2026', '07', '21'); fs.mkdirSync(day, { recursive: true });
+  const file = path.join(day, `rollout-2026-07-21T01-35-28-${CODEX_ID}.jsonl`);
+  writeRollout(file, 'New prompt on disk');
+  const stat = fs.statSync(file); const factsCacheFile = path.join(dir, 'facts.json');
+  fs.writeFileSync(factsCacheFile, JSON.stringify({ format: 'e823c78fa0869b94', files: { [file]: { size: stat.size, mtimeMs: stat.mtimeMs,
+    facts: { cwd: 'C:\\synthetic\\project', firstUser: 'Cached prompt', lineage: { kind: 'unknown', originator: 'codex_exec' } } } } }));
+  const provider = createProviderHistory({ codexRoot, cursorRoot: path.join(dir, 'none'), metadataFile: path.join(dir, 'meta.json'), factsCacheFile }); t.after(() => provider.close());
+  assert.equal((await provider.listSessions())[0].firstPrompt, 'Cached prompt', 'first refresh trusts compatible facts');
+  assert.equal((await provider.migrateEntries(8)).changed, 1);
+  assert.equal((await provider.listSessions())[0].firstPrompt, 'Cached prompt', 'lineage-only migration does not reparse prompt bodies');
+
+  const transcript = path.join(dir, 'background.jsonl'); const cacheFile = path.join(dir, 'fold.json');
+  const prefix = launchLines(); fs.writeFileSync(transcript, prefix);
+  const first = createScanner(); await first(transcript); await first.save(cacheFile);
+  const cached = JSON.parse(fs.readFileSync(cacheFile)); cached.format = 'da8a47743f347015'; fs.writeFileSync(cacheFile, JSON.stringify(cached));
+  blankPrefix(transcript, Buffer.byteLength(prefix)); fs.appendFileSync(transcript, doneLine());
+  const second = createScanner(); second.load(cacheFile);
+  assert.equal((await second(transcript)).state.tasks.old?.status, 'completed', 'IPC changes do not invalidate unchanged background folds');
+});
+
 test('the background fold resumes from its saved offset in a new scanner, and a foreign format starts over', async (t) => {
   const dir = tmp(t, 'harbor-fold-cache-');
   const file = path.join(dir, 'parent.jsonl');

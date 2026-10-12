@@ -11,7 +11,26 @@ const path = require('node:path');
 const JOB_OBJECT_ALL_ACCESS = 0x1f003f;
 const PROCESS_SET_QUOTA = 0x0100;
 const PROCESS_TERMINATE = 0x0001;
+const JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x0100;
 const JOB_OBJECT_LIMIT_JOB_MEMORY = 0x0200;
+// EVERY PROCESS IN A SESSION HAS A COMMIT CEILING BY DEFAULT (2026-10-11).
+// Pat, at 100% commit: "we keep having shit like this happen - analyze and get
+// it fixed for good", then, on a polling watchdog: "i dont want to keep having
+// scheduled tasks looping ... bloats my computer". One agent-launched
+// `python -c` test had committed 107 GB and Windows grew the page file to keep
+// it alive while everything else starved. The kernel now refuses any single
+// process in a session more than this much committed memory: the runaway's own
+// allocation fails, and nothing else is chosen or touched. This is the PER-
+// PROCESS limit, deliberately not the job-wide one (still opt-in below): a job
+// limit refuses EVERY process in the session once the tree is full, the keeper
+// and the agent included, while a per-process limit refuses only the one that
+// crossed it. 32 GiB is half of this 63 GB machine; the agent, the keeper and
+// MCP servers live far under it. HARBOR_SESSIOND_PROCESS_MEMORY_MAX overrides
+// it (a size like 48G, or off), through the daemon's environment.
+// Scope: PRIVATE committed memory per process. Pagefile-backed shared sections
+// escape it (measured), and many medium processes can still sum to
+// exhaustion; docs/claude/sessiond.md states the full scope.
+const DEFAULT_PROCESS_MEMORY_MAX = 32 * 1024 ** 3;
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
 const JobObjectBasicAccountingInformation = 1;
 const JobObjectBasicProcessIdList = 3;
@@ -60,7 +79,14 @@ function resolveJobPolicy(env = process.env, platform = process.platform) {
     namespace: namespace || null,
     store: defaultStore(env),
     memoryMax: parseByteLimit(env.HARBOR_SESSIOND_SESSION_JOB_MEMORY_MAX),
+    processMemoryMax: resolveProcessMemoryMax(env.HARBOR_SESSIOND_PROCESS_MEMORY_MAX),
   };
+}
+
+function resolveProcessMemoryMax(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_PROCESS_MEMORY_MAX;
+  if (/^(off|none|0)$/i.test(String(value).trim())) return null;
+  return parseByteLimit(value) ?? DEFAULT_PROCESS_MEMORY_MAX;
 }
 
 function parseByteLimit(value) {
@@ -89,6 +115,15 @@ function fail(operation) {
 // holder until the keeper opens its own handle, and a sole holder dying must
 // not take the live session with it (f8 finding M1). The KEEPER arms the flag
 // once it holds, via armKillOnClose below.
+// JOBOBJECT_EXTENDED_LIMIT_INFORMATION offsets (x64): LimitFlags 16,
+// ProcessMemoryLimit 112, JobMemoryLimit 120, PeakProcessMemoryUsed 128,
+// PeakJobMemoryUsed 136 (EXT_LIMIT_SIZE 144).
+function writeProcessMemoryLimit(buffer, policy) {
+  if (!policy?.processMemoryMax) return;
+  buffer.writeUInt32LE(buffer.readUInt32LE(16) | JOB_OBJECT_LIMIT_PROCESS_MEMORY, 16);
+  buffer.writeBigUInt64LE(BigInt(policy.processMemoryMax), 112);
+}
+
 function configure(handle, policy) {
   const buffer = Buffer.alloc(EXT_LIMIT_SIZE);
   let flags = 0;
@@ -97,15 +132,21 @@ function configure(handle, policy) {
     buffer.writeBigUInt64LE(BigInt(policy.memoryMax), 120);
   }
   buffer.writeUInt32LE(flags, 16);
+  writeProcessMemoryLimit(buffer, policy);
   if (!nativeApi().set(handle, JobObjectExtendedLimitInformation, buffer, buffer.length)) fail('SetInformationJobObject');
 }
 
-// Read-modify-write so arming never drops a configured memory limit.
-function armKillOnClose(job) {
+// Read-modify-write so arming never drops a configured memory limit. The
+// keeper also applies the per-process ceiling here (`policy`), because the
+// keeper is a fresh process per session reading this file from disk: a daemon
+// that was already running when the ceiling shipped still creates its jobs
+// without it, and every new session gets it anyway, with no daemon restart.
+function armKillOnClose(job, policy = null) {
   if (!job?.handle) return false;
   const buffer = Buffer.alloc(EXT_LIMIT_SIZE);
   if (!nativeApi().query(job.handle, JobObjectExtendedLimitInformation, buffer, buffer.length, null)) fail('QueryInformationJobObject(limits)');
   buffer.writeUInt32LE(buffer.readUInt32LE(16) | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 16);
+  writeProcessMemoryLimit(buffer, policy);
   if (!nativeApi().set(job.handle, JobObjectExtendedLimitInformation, buffer, buffer.length)) fail('SetInformationJobObject(arm)');
   return true;
 }
@@ -157,6 +198,7 @@ function queryJob(job, maxPids = 4096) {
     terminatedProcesses: acct.readUInt32LE(44),
     pids,
     limitFlags: limits.readUInt32LE(16),
+    processMemoryLimitBytes: Number(limits.readBigUInt64LE(112)),
     jobMemoryLimitBytes: Number(limits.readBigUInt64LE(120)),
     peakProcessMemoryBytes: Number(limits.readBigUInt64LE(128)),
     peakJobMemoryBytes: Number(limits.readBigUInt64LE(136)),
@@ -178,5 +220,6 @@ function closeJob(job) {
 module.exports = {
   resolveJobPolicy, parseByteLimit, jobName, createSessionJob, openSessionJob,
   assignPid, queryJob, terminateJob, closeJob, armKillOnClose,
-  JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_JOB_MEMORY,
+  JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+  DEFAULT_PROCESS_MEMORY_MAX,
 };
