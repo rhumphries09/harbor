@@ -100,29 +100,34 @@ Each dispatch response should carry, if your delegate tooling supports it:
    example two full test/e2e suites) concurrently against the same
    workspace: concurrent runs of the same gate can deadlock each other.
 
-Dispatch parallel lanes whenever the queue allows it, if your delegate
-tooling supports it. Serial-only execution turns a day's queue into an
-unnecessarily long night:
+Run the queue as a **pipeline, never in waves**. Serial-only execution
+turns a day's queue into an unnecessarily long night, and so does waiting
+for a whole wave to finish before starting the next batch:
 
-```bash
-claude-delegate dispatch-parallel --max 3
-```
-
-A parallel dispatch typically picks same-sprint pending batches with
-pairwise-disjoint file lists, runs each worker concurrently (for example
-in its own git worktree), and merges successful lanes back; a failed
-worker's lane should never be merged, and its work should be kept around
-for inspection. Verify the merged tree once per wave, not once per batch.
-Fall back to one batch at a time when batches genuinely share files:
-
-```bash
-claude-delegate dispatch-next
-```
+- Dispatch every batch whose dependencies are done, up to the worker
+  capacity your machine and accounts allow (memory, plan usage), each in
+  its own git worktree, if your delegate tooling supports parallel
+  dispatch. Claim only what you launch now; a claimed batch reads as
+  running.
+- Two concurrent batches that share files are a merge to resolve at
+  integration, not a reason to wait. A batch waits only for a real data
+  dependency, for capacity, or for an exclusive resource another batch is
+  using (a device or emulator, one build slot, a deploy target).
+- Every time a worker finishes: review it, merge it, run the affected
+  checks, mark it done, then dispatch whatever just became ready. A
+  dependent batch is cut from the merged result, so it starts from what it
+  needs. A failed worker's branch is never merged; keep it for inspection.
+- Review what the worker COMMITTED, not only its uncommitted diff: diff
+  from the commit its worktree was cut from
+  (`git diff "$(git merge-base HEAD <integration branch>)"`, plus `git log`
+  over the same range and `git status` for untracked files).
+- Mark a batch done only after its merge and checks pass; marking done is
+  what releases the batches that depend on it.
 
 **Gate economics:** run whatever verification the target repo defines
-(tests, lint, a filtered subset) on the affected slice per batch when a
+(tests, lint, a filtered subset) on the affected slice per merge when a
 fast filtered check is available. Run the full, unfiltered verification
-once per merged wave, and again at the final ship gate. A filtered green
+before each push, and again at the final ship gate. A filtered green
 result is never a substitute for the ship-gate green.
 
 For each worker result, classify it using this aggressive bias:

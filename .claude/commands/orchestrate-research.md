@@ -67,12 +67,36 @@ Rules:
   system, or explicitly instruct the worker to capture one before coding.
   A worker allowed to invent its own fixture will pass its own tests and
   fail reality.
-- **Design for parallel lanes**, if your delegate tooling supports
-  dispatching same-sprint batches concurrently (for example in separate
-  git worktrees): list every file a batch may touch, use absolute paths,
-  and split sprints so independent batches don't share files. Batches with
-  disjoint file lists can run concurrently; batches that share files must
-  be sequenced.
+- **Design for the shortest run, not the safest-looking order.** A plan
+  that sequences batches "to be safe" looks careful and costs hours: a
+  16-batch release run that held its second wave behind its two slowest
+  batches, and saved its release image and every review for the end, was
+  quoted most of a night for about 90 minutes of work. Rules:
+  - Sequence a batch only for a **real data dependency**: it cannot START
+    without something another batch produces (a file it reads, an API or
+    schema it calls, a decision the other batch makes). When only part of
+    a batch needs that output, split that part off and start the rest now.
+  - Sharing or neighbouring files is **not** a dependency when each batch
+    runs in its own git worktree: list every file a batch may touch (with
+    absolute paths) so you know where the merges will be, and resolve them
+    at integration. If your delegate tooling only co-schedules batches
+    with disjoint file lists, that is a limitation to work around, not a
+    reason to serialize the plan.
+  - When one batch builds against another's interface (a UI against an
+    API, an app against a server), write the contract into both packets
+    now and run them at once instead of in a chain.
+  - Things a worktree does not isolate (an emulator or device, a single
+    build slot, a deploy target, a shared database) are allocated up front
+    (ports, migration numbers, test database names) or isolated in a short
+    batch of their own that runs one at a time; the code work around them
+    stays parallel.
+  - Keep each batch to tens of minutes; the longest one sets the pace of
+    everything after it. Nothing waits for "everything": release assets
+    start from the spec with a short finalize pass at the end, and reviews
+    run per batch as each lands.
+  - Before queueing, add up the longest dependency chain. That is the
+    run's floor however many workers run; if it is longer than the run
+    should take, restructure.
 
 ## Workflow
 
@@ -124,7 +148,9 @@ Notes:
   like `MISSION-1`, `MISSION-2`, etc.
 - Keep packets narrow and shippable.
 - Include only the minimum code/context needed.
-- Preserve real dependency order when one batch must precede another.
+- Preserve real dependency order when one batch must precede another, and
+  only then: every ordering you add serializes work that could have run
+  in parallel.
 - Avoid broad redesign unless a narrow path is clearly unsafe.
 
 ### Phase 3: Import the queue

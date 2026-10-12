@@ -10,7 +10,8 @@ const APP_DIR = path.resolve(__dirname, '..');
 const ELECTRON = path.join(APP_DIR, 'node_modules', 'electron', 'dist', 'electron.exe');
 const PORT = 9340;
 const OUT = path.join(os.tmpdir(), 'harbor-drive-orch');
-const SESSION_ID = 'a1000000-0000-4000-8000-000000000001';
+const RUN_LINE = '1 working · 1 awaiting review · 1 quiet · 1 ready, not started · 1 waiting on other batches';
+const SESSION_ID ='a1000000-0000-4000-8000-000000000001';
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -58,7 +59,7 @@ async function waitFor(cdp, expression, label, timeoutMs = 30000) {
 async function main() {
   fs.rmSync(OUT, { recursive: true, force: true });
   fs.mkdirSync(OUT, { recursive: true });
-  execSync('npm run build', { cwd: APP_DIR, stdio: 'inherit' });
+  if (!process.env.DRIVE_SKIP_BUILD) execSync('npm run build', { cwd: APP_DIR, stdio: 'inherit' });
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-orch-drive-'));
   const userData = path.join(tmp, 'userData');
@@ -83,6 +84,12 @@ async function main() {
       { id: 'working', title: 'Working batch', status: 'active', worker_engine: 'codex', last_dispatched_at: new Date(now - 15 * 60_000).toISOString() },
       { id: 'review', title: 'Finished unreviewed batch', status: 'active', worker_engine: 'claude', last_dispatched_at: new Date(now - 30 * 60_000).toISOString() },
       { id: 'quiet', title: 'Quiet batch', status: 'active', worker_engine: 'cursor', last_dispatched_at: new Date(now - 55 * 60_000).toISOString() },
+      // 2026-10-12: a pending batch says whether it could start now or what
+      // holds it, and two finished ones give the dependency-aware ETA.
+      { id: 'ready', title: 'Ready batch nobody dispatched', status: 'pending', worker_engine: 'claude' },
+      { id: 'held', title: 'Held batch', status: 'pending', worker_engine: 'claude', depends_on: ['working', 'review', 'quiet'] },
+      { id: 'early-1', title: 'Finished batch one', status: 'done', worker_engine: 'claude', started_at: new Date(now - 60 * 60_000).toISOString(), completed_at: new Date(now - 40 * 60_000).toISOString() },
+      { id: 'early-2', title: 'Finished batch two', status: 'done', worker_engine: 'codex', started_at: new Date(now - 60 * 60_000).toISOString(), completed_at: new Date(now - 30 * 60_000).toISOString() },
     ],
   };
   const digest = crypto.createHash('sha1').update(workspace).digest('hex').slice(0, 12);
@@ -101,14 +108,16 @@ async function main() {
 
   const child = spawn(ELECTRON, [APP_DIR, `--remote-debugging-port=${PORT}`, '--no-focus-steal'], {
     env: { ...process.env, HARBOR_E2E: '1', HARBOR_E2E_USER_DATA: userData, HARBOR_NO_DAEMON_START: '1', HARBOR_SESSIOND_DIR: path.join(tmp, 'sessiond'), HARBOR_CONTEXT_DIR: path.join(tmp, 'context'), HARBOR_NO_ICON_GEN: '1', HARBOR_NO_USAGE_FETCH: '1', HARBOR_NO_TITLER: '1' },
-    stdio: 'ignore',
+    // The app's own output lands beside the screenshots, so a launch that
+    // never opens its debug port says why instead of timing out blind.
+    stdio: ['ignore', fs.openSync(path.join(OUT, 'electron.log'), 'w'), fs.openSync(path.join(OUT, 'electron.log'), 'a')],
   });
   const results = [];
   const failures = [];
   const check = (condition, message) => { if (!condition) failures.push(message); };
   try {
     let target;
-    for (let index = 0; index < 60 && !target; index += 1) {
+    for (let index = 0; index < 180 && !target; index += 1) {
       await sleep(500);
       try { target = (await fetch(`http://127.0.0.1:${PORT}/json/list`).then((response) => response.json())).find((item) => item.type === 'page' && !item.url.startsWith('devtools:')); } catch {}
     }
@@ -123,9 +132,10 @@ async function main() {
     await cdp.send('Page.enable');
     execSync(`powershell -NoProfile -Command "Add-Type -Name W -Namespace P -MemberDefinition '[DllImport(\\"user32.dll\\")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int cy, uint f);'; $p = Get-Process -Id ${child.pid} -ErrorAction SilentlyContinue; if ($p -and $p.MainWindowHandle -ne 0) { [P.W]::SetWindowPos($p.MainWindowHandle, [IntPtr]::Zero, -4200, 100, 1600, 1000, 0x0014) }"`, { stdio: 'ignore' });
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
-    await waitFor(cdp, "[...document.querySelectorAll('.view-switch-btn')].some((button) => button.textContent.trim() === 'Orch')", 'Orch tab');
+    // Tabs are found by aria-label: inactive view tabs draw no text (views.md).
+    await waitFor(cdp, "Boolean(document.querySelector('.view-switch-btn[aria-label=\"Orch\"]'))", 'Orch tab');
     await cdp.eval(`localStorage.setItem('harbor-slate-stage', ${JSON.stringify(JSON.stringify({ tiles: [{ sessionId: SESSION_ID, slot: 0 }], selectedId: SESSION_ID }))}); localStorage.setItem('harbor-view', 'orch'); location.reload()`);
-    await waitFor(cdp, "document.querySelectorAll('.orch-run-batch').length === 3", 'three overview batches');
+    await waitFor(cdp, "document.querySelectorAll('.orch-run-batch').length === 7", 'seven overview batches');
     const overview = await cdp.eval("[...document.querySelectorAll('.orch-run-batch')].map((row) => ({ text: row.textContent, quiet: row.classList.contains('quiet') }))");
     const text = overview.map((row) => row.text).join('\n');
     results.push(`overview: ${text}`);
@@ -133,22 +143,44 @@ async function main() {
     check(text.includes('awaiting review, last signal'), 'awaiting review state or signal age missing');
     check(text.includes('quiet 45m, possibly hung'), 'quiet state missing');
     check(overview.some((row) => row.quiet), 'quiet batch is not amber');
+    // The row's three spans concatenate with no separator in textContent.
+    check(text.includes('Ready batch nobody dispatchedclaudeready, not started'), 'ready batch does not read "ready, not started"');
+    check(text.includes('waits on working, review +1 more'), 'held batch does not name what it waits on');
+    const runLine = await cdp.eval("[...document.querySelectorAll('.orch-run-eta')].map((node) => node.textContent).join(' | ')");
+    results.push(`run line: ${runLine}`);
+    // Counted by what each worker is doing, never "3 running" over a working,
+    // a finished and a hung worker (review finding, 2026-10-12).
+    check(runLine.includes(RUN_LINE), 'run counts line missing');
+    check(/rough ETA about \d+ min, 2 batches are past the usual length so likely later/.test(runLine), 'dependency-aware ETA or its running-long note missing');
     await cdp.shot('1-live-runs-overview');
 
-    await cdp.eval("[...document.querySelectorAll('.view-switch-btn')].find((button) => button.textContent.trim() === 'Agents').click()");
+    await cdp.eval("document.querySelector('.view-switch-btn[aria-label=\"Agents\"]').click()");
     await waitFor(cdp, "Boolean(document.querySelector('.orch-pill'))", 'session orchestration pill');
-    const pill = await cdp.eval("({ text: document.querySelector('.orch-pill').textContent, quiet: document.querySelector('.orch-pill').classList.contains('quiet') })");
+    const pill = await cdp.eval("({ text: document.querySelector('.orch-pill').textContent, title: document.querySelector('.orch-pill').title, quiet: document.querySelector('.orch-pill').classList.contains('quiet') })");
     results.push(`pill: ${pill.text}`);
-    check(/^Orch 0\/3/.test(pill.text), 'pill does not show Orch done/total');
+    check(/^Orch 2\/7/.test(pill.text), 'pill does not show Orch done/total');
     check(pill.text.includes('last signal'), 'pill omits signal age');
+    check(pill.title.startsWith(pill.text), 'pill tooltip does not carry the whole clipped line');
     await cdp.shot('2-session-pill');
     await cdp.eval("document.querySelector('.orch-pill').click()");
-    await waitFor(cdp, "Boolean(document.querySelector('.orch-panel') && document.querySelectorAll('.orch-batch-card').length === 3)", 'focused run panel');
+    await waitFor(cdp, "Boolean(document.querySelector('.orch-panel') && document.querySelectorAll('.orch-batch-card').length === 7)", 'focused run panel');
+    const panel = await cdp.eval("({ eta: document.querySelector('.orch-eta')?.textContent || '', cards: [...document.querySelectorAll('.orch-batch-card')].map((card) => card.textContent) })");
+    results.push(`panel summary: ${panel.eta}`);
+    check(panel.eta.includes(RUN_LINE), 'panel summary omits the run counts');
+    check(panel.eta.includes('past the usual length'), 'panel ETA omits the running-long note');
+    check(panel.cards.some((card) => card.includes('ready, not started')), 'panel ready card missing');
+    check(panel.cards.some((card) => card.includes('waits on working, review +1 more')), 'panel waiting card does not name its blockers');
+    const stamps = await cdp.eval("[...document.querySelectorAll('.orch-event-row time')].map((node) => ({ text: node.textContent, height: node.getBoundingClientRect().height }))");
+    results.push(`event stamps: ${stamps.map((stamp) => `${stamp.text} (${Math.round(stamp.height)}px)`).join(', ')}`);
+    check(stamps.length && stamps.every((stamp) => /^\d\d:\d\d$/.test(stamp.text) && stamp.height < 24), 'event times are not one-line clock times');
+    await cdp.shot('3-pill-focused-run');
+    await cdp.eval("[...document.querySelectorAll('.orch-batch-card')].find((card) => card.textContent.includes('Held batch')).scrollIntoView({ block: 'center' })");
+    await sleep(300);
+    await cdp.shot('4-panel-waiting-card');
     // The fixture workspace is derived from wherever this repo checkout lives,
     // so the assertion must be too; a literal folder name pinned the drive to
     // the worktree it was authored in (caught on the first main-tree run).
     check(await cdp.eval(`document.querySelector('.orch-panel-title').textContent.includes(${JSON.stringify(path.basename(workspace))})`), 'pill did not focus the matching run');
-    await cdp.shot('3-pill-focused-run');
   } finally {
     await sleep(500);
     try { child.kill(); } catch {}

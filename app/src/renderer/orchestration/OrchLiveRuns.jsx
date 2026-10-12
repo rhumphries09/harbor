@@ -3,6 +3,7 @@ import { OrchProjectPicker } from './OrchProjectPicker.jsx';
 import { Delegations } from './Delegations.jsx';
 import { SubSessions } from './SubSessions.jsx';
 import { createSingleFlight } from '../../shared/single-flight.js';
+import { etaText, runCounts, waitingText } from './orch-text.cjs';
 
 function ageText(ms) {
   if (ms == null) return 'no liveness signal';
@@ -11,6 +12,8 @@ function ageText(ms) {
 }
 
 function stateText(batch) {
+  if (batch.workerState === 'ready') return 'ready, not started';
+  if (batch.workerState === 'waiting') return waitingText(batch.waitingOn);
   if (batch.workerState === 'working') return `working, ${ageText(batch.signalAgeMs)}`;
   if (batch.workerState === 'awaiting-review') return `awaiting review, ${ageText(batch.signalAgeMs)}`;
   if (batch.workerState === 'quiet') return `quiet ${Math.max(1, Math.floor(batch.signalAgeMs / 60_000))}m, possibly hung`;
@@ -42,8 +45,9 @@ export function OrchLiveRuns({ projects, onPick, focusParentId, onOpenSession })
         <span className="orch-picker-subtitle">Every active or recently finished orchestration, with the age of its evidence</span>
       </div>
       {error ? <div className="orch-error-banner">{error}</div> : null}
-      <Delegations groups={delegations} focusParentId={focusParentId} onOpenSession={onOpenSession} />
-      <SubSessions onOpenSession={onOpenSession} />
+      {/* The runs this header names come first (2026-10-12). Below them sat a
+          sub-sessions list of every approval review, which pushed the run
+          cards off the first screen. */}
       {runs === null ? <p className="orch-loading">Loading...</p> : null}
       {runs?.length === 0 && !delegations.some((group) => group.visible) ? <p className="orch-picker-empty">No live or recently finished runs.</p> : null}
       <div className="orch-run-list">
@@ -71,15 +75,18 @@ export function OrchLiveRuns({ projects, onPick, focusParentId, onOpenSession })
                   <span className={`orch-run-batch ${live.workerState === 'quiet' ? 'quiet' : ''}`} key={batch.id}>
                     <span>{batch.title || batch.id}</span>
                     <span>{batch.worker_engine || batch.worker || 'worker not recorded'}</span>
-                    <span>{stateText(live)}</span>
+                    <span title={live.waitingOn?.length ? `waits on ${live.waitingOn.join(', ')}` : undefined}>{stateText(live)}</span>
                   </span>
                 );
               })}
             </span>
-            {run.summary.etaMs ? <span className="orch-run-eta">rough ETA {Math.max(1, Math.round(run.summary.etaMs / 60_000))}m</span> : null}
+            {runCounts(run.summary) ? <span className="orch-run-eta">{runCounts(run.summary)}</span> : null}
+            {etaText(run.summary) ? <span className="orch-run-eta">{etaText(run.summary)}</span> : null}
           </button>
         ))}
       </div>
+      <Delegations groups={delegations} focusParentId={focusParentId} onOpenSession={onOpenSession} />
+      <SubSessions onOpenSession={onOpenSession} />
       <div className="orch-overview-kickoff">
         <h3>Start or inspect another project</h3>
         <OrchProjectPicker projects={projects} onPick={onPick} compact />

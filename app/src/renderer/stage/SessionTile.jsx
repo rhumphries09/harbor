@@ -116,7 +116,9 @@ function OrchestrationPill({ summary, onClick }) {
     <button
       type="button"
       className={`orch-pill ${summary.currentState === 'quiet' ? 'quiet' : ''}`}
-      title="Open orchestration status"
+      // The pill clips at its max width ("Orch 2/7 quiet, ..."), so the
+      // tooltip carries the whole line.
+      title={`${label}. Open orchestration status`}
       onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => { event.stopPropagation(); onClick(); }}
     >

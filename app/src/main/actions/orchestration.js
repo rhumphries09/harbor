@@ -87,9 +87,13 @@ function checkExecuteMutex({ projectLabel, terminalState, queue }) {
   }
   const activeBatches = (queue?.batches || []).filter((b) => b.status === 'active');
   if (activeBatches.length > 0) {
+    // Not "wait for completion": the executing session that owns these
+    // batches dispatches the ready ones as each lands, and telling the user to
+    // wait for the whole wave was the sequential habit itself (2026-10-12).
+    const count = activeBatches.length;
     return {
       blocked: true,
-      reason: `Queue has ${activeBatches.length} active batch${activeBatches.length === 1 ? '' : 'es'} in progress. Wait for completion.`,
+      reason: `${count} batch${count === 1 ? ' is' : 'es are'} active under the execution session running this queue; it starts the ready ones as capacity frees. A second execution would claim the same batches, so Execute opens again once none is active.`,
     };
   }
   return { blocked: false, reason: null };

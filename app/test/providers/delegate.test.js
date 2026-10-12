@@ -69,7 +69,12 @@ test('summarizeQueue matches workspace, counts completion, chooses current engin
     remaining: 2,
     currentBatchId: 'b3',
     workerEngine: 'sol',
+    active: 1,
+    ready: 1,
+    waiting: 0,
+    overrunning: 0,
     etaMs: 30 * 60 * 1000,
+    etaUnknown: null,
     updatedAt: Date.parse('2026-07-20T11:59:00Z'),
     state: 'live',
     visible: true,
@@ -130,7 +135,203 @@ test('worker liveness derives working, awaiting review, quiet, and done with evi
   assert.equal(run.summary.quiet, 1);
   assert.equal(run.summary.currentState, 'quiet');
   assert.equal(run.summary.signal, 'last signal 45m ago');
-  assert.equal(run.summary.etaMs, 10 * 60_000);
+  // All three active batches have run past the 10-minute average and run side
+  // by side, so each is charged a quarter of it: 2.5 minutes, not the old
+  // average x 3 / 3.
+  assert.equal(run.summary.etaMs, 2.5 * 60_000);
+});
+
+// 2026-10-12, Pat: "you need more shit running in parallel - not all of this
+// needs to be sequential". The panel could not tell a batch held back by a
+// dependency from one that was ready and simply never dispatched: both read
+// "no liveness signal". And its ETA fell back to fully serial whenever nothing
+// happened to be active between waves.
+test('a pending batch reads ready or waiting on the batches it names', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  const queue = { queue_id: 'ready', workspace: '/work/harbor', batches: [
+    { id: 'a', title: 'A', status: 'done', started_at: '2026-10-12T02:00:00Z', completed_at: '2026-10-12T02:20:00Z' },
+    { id: 'b', title: 'B', status: 'active', last_dispatched_at: '2026-10-12T02:50:00Z' },
+    { id: 'c', title: 'C', status: 'pending', depends_on: ['a'] },
+    { id: 'd', title: 'D', status: 'pending', depends_on: ['a', 'b'] },
+    { id: 'e', title: 'E', status: 'pending', depends_on: ['ghost'] },
+  ] };
+  const joined = joinBatchesToSessions(queue, [], [], now);
+  assert.deepEqual(joined.map(({ batchId, workerState, waitingOn }) => ({ batchId, workerState, waitingOn })), [
+    { batchId: 'a', workerState: 'done', waitingOn: null },
+    { batchId: 'b', workerState: 'no-signal', waitingOn: null },
+    { batchId: 'c', workerState: 'ready', waitingOn: [] },
+    { batchId: 'd', workerState: 'waiting', waitingOn: ['b'] },
+    { batchId: 'e', workerState: 'waiting', waitingOn: ['ghost'] },
+  ]);
+  const summary = summarizeQueue(queue, '/work/harbor', now);
+  assert.deepEqual([summary.active, summary.ready, summary.waiting], [1, 1, 2]);
+});
+
+test('an idle run with ready batches says so in the pill word', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  const queue = { queue_id: 'idle', workspace: '/work/harbor', updated_at: '2026-10-12T02:59:00Z', batches: [
+    { id: 'a', title: 'A', status: 'done', started_at: '2026-10-12T02:00:00Z', completed_at: '2026-10-12T02:20:00Z' },
+    { id: 'b', title: 'B', status: 'pending', depends_on: ['a'] },
+  ] };
+  assert.equal(deriveRun(queue, [], [], now).summary.stateWord, 'ready, not started');
+});
+
+test('the ETA schedules the dependency graph at the run\'s observed width', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  const done = (id, start, end) => ({ id, status: 'done', started_at: `2026-10-12T${start}:00Z`, completed_at: `2026-10-12T${end}:00Z` });
+  // Two finished batches ran side by side for 10 minutes each: width 2.
+  const base = [done('x', '02:30', '02:40'), done('y', '02:30', '02:40')];
+  const chain = { queue_id: 'chain', workspace: '/work/harbor', batches: [...base,
+    { id: 'a', status: 'pending' },
+    { id: 'b', status: 'pending', depends_on: ['a'] },
+    { id: 'c', status: 'pending', depends_on: ['b'] },
+    { id: 'd', status: 'pending' },
+  ] };
+  // a -> b -> c is three durations however wide; d runs beside a. The old
+  // rule said average x 4 remaining / 0 active = 40 minutes.
+  assert.equal(summarizeQueue(chain, '/work/harbor', now).etaMs, 30 * 60_000);
+  const wide = { queue_id: 'wide', workspace: '/work/harbor', batches: [...base, done('z', '02:30', '02:40'),
+    ...Array.from({ length: 6 }, (_, index) => ({ id: `p${index}`, status: 'pending' }))] };
+  assert.equal(summarizeQueue(wide, '/work/harbor', now).etaMs, 20 * 60_000);
+  const cycle = { queue_id: 'cycle', workspace: '/work/harbor', batches: [...base,
+    { id: 'a', status: 'pending', depends_on: ['b'] },
+    { id: 'b', status: 'pending', depends_on: ['a'] },
+  ] };
+  assert.equal(summarizeQueue(cycle, '/work/harbor', now).etaMs, null);
+});
+
+// Astra's adversarial review of the change above (2026-10-12), each finding
+// reproduced here before it was fixed.
+test('the ETA is unknown, with a reason, when work waits on a failed, blocked, missing or self dependency', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  const done = (id) => ({ id, status: 'done', started_at: '2026-10-12T02:30:00Z', completed_at: '2026-10-12T02:40:00Z' });
+  const base = [done('x'), done('y')];
+  for (const [label, extra] of [
+    ['failed', [{ id: 'a', status: 'failed' }, { id: 'b', status: 'pending', depends_on: ['a'] }]],
+    ['blocked', [{ id: 'a', status: 'blocked' }, { id: 'b', status: 'pending', depends_on: ['a'] }]],
+    ['missing', [{ id: 'b', status: 'pending', depends_on: ['ghost'] }]],
+    ['self', [{ id: 'b', status: 'pending', depends_on: ['b'] }]],
+  ]) {
+    const summary = summarizeQueue({ queue_id: label, workspace: '/work/harbor', batches: [...base, ...extra] }, '/work/harbor', now);
+    assert.equal(summary.etaMs, null, `${label} dependency still produced an ETA`);
+    assert.equal(summary.etaUnknown, 'the dependencies cannot finish as recorded (failed, blocked, missing, circular, or a batch started before its dependency)', label);
+  }
+  const oneSample = summarizeQueue({ queue_id: 'one', workspace: '/work/harbor', batches: [done('x'), { id: 'b', status: 'pending' }] }, '/work/harbor', now);
+  assert.equal(oneSample.etaUnknown, 'needs two finished batches');
+});
+
+test('retries are measured from their latest dispatch, and a reset batch has no worker', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  // Three batches whose first attempts failed at 01:00, 01:10 and 01:20 and
+  // whose retries then ran one after another, ten minutes each.
+  const retried = (id, first, retry, end) => ({ id, status: 'done', started_at: `2026-10-12T${first}:00Z`,
+    last_dispatched_at: `2026-10-12T${retry}:00Z`, completed_at: `2026-10-12T${end}:00Z` });
+  const batches = [retried('a', '01:00', '02:00', '02:10'), retried('b', '01:10', '02:10', '02:20'), retried('c', '01:20', '02:20', '02:30'),
+    // Reset back to pending after a dead run: its old stamps are not a worker.
+    { id: 'reset', status: 'pending', started_at: '2026-10-12T02:00:00Z', last_dispatched_at: '2026-10-12T02:00:00Z' },
+    ...Array.from({ length: 5 }, (_, index) => ({ id: `p${index}`, status: 'pending' }))];
+  // Width 1 and ten-minute batches: six remaining take 60 minutes, not the
+  // 140 the first-start intervals implied.
+  assert.equal(summarizeQueue({ queue_id: 'retry', workspace: '/work/harbor', batches }, '/work/harbor', now).etaMs, 60 * 60_000);
+});
+
+test('a batch that needs a resource another active batch holds waits for it, and the ETA queues it', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  const done = (id) => ({ id, status: 'done', started_at: '2026-10-12T02:30:00Z', completed_at: '2026-10-12T02:40:00Z' });
+  const queue = { queue_id: 'device', workspace: '/work/harbor', batches: [done('x'), done('y'),
+    { id: 'android-a', title: 'A', status: 'active', resources: ['android-emulator'], last_dispatched_at: '2026-10-12T02:58:00Z' },
+    { id: 'android-b', title: 'B', status: 'pending', resources: ['Android-Emulator'] },
+    { id: 'free', title: 'F', status: 'pending' },
+  ] };
+  const joined = joinBatchesToSessions(queue, [], [], now);
+  assert.deepEqual(joined.find((row) => row.batchId === 'android-b').waitingOn, ['android-emulator (held by android-a)']);
+  assert.equal(joined.find((row) => row.batchId === 'free').workerState, 'ready');
+  const summary = summarizeQueue(queue, '/work/harbor', now);
+  assert.deepEqual([summary.ready, summary.waiting], [1, 1]);
+  // android-a has 8 of its 10 minutes left; android-b then needs the device
+  // for 10 more, while free runs beside them: 18 minutes.
+  assert.equal(summary.etaMs, 18 * 60_000);
+});
+
+// Astra review, round 2.
+test('an active batch whose own dependency is not done makes the ETA unknown', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  const done = (id) => ({ id, status: 'done', started_at: '2026-10-12T02:30:00Z', completed_at: '2026-10-12T02:40:00Z' });
+  for (const extra of [
+    // A cycle with its active half simulated as running would look finishable.
+    [{ id: 'a', status: 'active', depends_on: ['b'], last_dispatched_at: '2026-10-12T02:58:00Z' }, { id: 'b', status: 'pending', depends_on: ['a'] }],
+    [{ id: 'a', status: 'pending' }, { id: 'b', status: 'active', depends_on: ['a'], last_dispatched_at: '2026-10-12T02:58:00Z' }],
+  ]) {
+    const summary = summarizeQueue({ queue_id: 'early', workspace: '/work/harbor', batches: [done('x'), done('y'), ...extra] }, '/work/harbor', now);
+    assert.equal(summary.etaMs, null);
+    assert.match(summary.etaUnknown, /started before its dependency/);
+  }
+});
+
+test('ten thousand batches contending for one emulator schedule in well under a second', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  // Two overlapping finished batches give width 2, so a slot is always free
+  // while every pending batch waits on the one device.
+  const batches = [
+    { id: 'x', status: 'done', started_at: '2026-10-12T02:30:00Z', completed_at: '2026-10-12T02:40:00Z' },
+    { id: 'y', status: 'done', started_at: '2026-10-12T02:30:00Z', completed_at: '2026-10-12T02:40:00Z' },
+    ...Array.from({ length: 10_000 }, (_, index) => ({ id: `e${index}`, status: 'pending', resources: ['emulator'] })),
+    { id: 'free', status: 'pending' },
+  ];
+  const started = performance.now();
+  const summary = summarizeQueue({ queue_id: 'contended', workspace: '/work/harbor', batches }, '/work/harbor', now);
+  assert.equal(summary.etaMs, 10_000 * 10 * 60_000);
+  assert.ok(performance.now() - started < 1000, `took ${Math.round(performance.now() - started)}ms`);
+});
+
+test('a batch blocked on one resource hands its turn on another to the next waiter', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  const done = (id) => ({ id, status: 'done', started_at: '2026-10-12T02:30:00Z', completed_at: '2026-10-12T02:40:00Z' });
+  // Width 2. hold-s holds S for 30 more minutes (overrun floor aside: it was
+  // just dispatched). both needs R and S; r-only needs R. r-only must not
+  // wait behind both just because both sits earlier in the queue.
+  const batches = [done('x'), done('y'),
+    { id: 'hold-s', status: 'active', resources: ['s'], last_dispatched_at: '2026-10-12T03:00:00Z' },
+    { id: 'both', status: 'pending', resources: ['r', 's'] },
+    { id: 'r-only', status: 'pending', resources: ['r'] },
+  ];
+  // r-only runs beside hold-s (0 to 10), then both runs once S frees (10 to 20).
+  assert.equal(summarizeQueue({ queue_id: 'handoff', workspace: '/work/harbor', batches }, '/work/harbor', now).etaMs, 20 * 60_000);
+});
+
+test('a blank resource name holds nothing and blocks nothing', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  const done = (id) => ({ id, status: 'done', started_at: '2026-10-12T02:30:00Z', completed_at: '2026-10-12T02:40:00Z' });
+  const queue = { queue_id: 'blank', workspace: '/work/harbor', batches: [done('x'), done('y'),
+    { id: 'a', status: 'active', resources: [''], last_dispatched_at: '2026-10-12T03:00:00Z' },
+    { id: 'b', status: 'pending', resources: ['', '  '] },
+  ] };
+  assert.equal(joinBatchesToSessions(queue, [], [], now).find((row) => row.batchId === 'b').workerState, 'ready');
+  assert.equal(summarizeQueue(queue, '/work/harbor', now).etaMs, 10 * 60_000);
+});
+
+test('an active batch past the average is counted as running long', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  const done = (id) => ({ id, status: 'done', started_at: '2026-10-12T02:30:00Z', completed_at: '2026-10-12T02:40:00Z' });
+  const summary = summarizeQueue({ queue_id: 'long', workspace: '/work/harbor', batches: [done('x'), done('y'),
+    { id: 'slow', status: 'active', last_dispatched_at: '2026-10-12T01:30:00Z' },
+    { id: 'fresh', status: 'active', last_dispatched_at: '2026-10-12T02:58:00Z' },
+  ] }, '/work/harbor', now);
+  assert.equal(summary.overrunning, 1);
+});
+
+test('a ten-thousand batch chain schedules in well under a second', () => {
+  const now = Date.parse('2026-10-12T03:00:00Z');
+  const batches = [
+    { id: 'x', status: 'done', started_at: '2026-10-12T02:30:00Z', completed_at: '2026-10-12T02:40:00Z' },
+    { id: 'y', status: 'done', started_at: '2026-10-12T02:30:00Z', completed_at: '2026-10-12T02:40:00Z' },
+    // Reverse order, so every link points forward: the worst case for a scan.
+    ...Array.from({ length: 10_000 }, (_, index) => ({ id: `c${index}`, status: 'pending', depends_on: index < 9_999 ? [`c${index + 1}`] : [] })),
+  ];
+  const started = performance.now();
+  const summary = summarizeQueue({ queue_id: 'big', workspace: '/work/harbor', batches }, '/work/harbor', now);
+  assert.equal(summary.etaMs, 10_000 * 10 * 60_000);
+  assert.ok(performance.now() - started < 1000, `took ${Math.round(performance.now() - started)}ms`);
 });
 
 // One completed duration extrapolated over the whole queue is an invention

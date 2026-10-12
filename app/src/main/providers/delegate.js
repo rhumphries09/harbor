@@ -82,6 +82,227 @@ function workerEngine(batch) {
   return parts.length > 2 ? parts.at(-1) : worker.replace(/-worker$/, '');
 }
 
+const STOPPED_STATUSES = new Set(['blocked', 'failed', 'error']);
+// An active batch that has already run past the average is not about to
+// finish this second; it is charged this share of the average as what is left,
+// and the summary counts it in `overrunning` so the ETA can say it is soft.
+const OVERRUN_REMAINING_SHARE = 0.25;
+
+function statusOf(batch) {
+  return String(batch?.status || 'pending').toLowerCase();
+}
+
+// The LATEST attempt's start. `claude-delegate next` rewrites
+// last_dispatched_at on every claim but keeps the first started_at, so a
+// failed first try and a later retry would otherwise read as one long run,
+// inventing both concurrency and duration (review finding, 2026-10-12).
+function attemptStart(batch) {
+  return timestamp(batch.last_dispatched_at || batch.started_at || batch.startedAt);
+}
+
+function attemptEnd(batch) {
+  return timestamp(batch.completed_at || batch.finished_at || batch.updated_at);
+}
+
+// Named things two workers cannot use at the same moment (an emulator, one
+// build slot, a deploy target). A batch that declares one does not start while
+// another active batch holds it. Lowercased so `Android-Emulator` and
+// `android-emulator` are one device.
+function resourcesOf(batch) {
+  // A blank name names nothing; the CLI drops it the same way and refuses to
+  // queue one (Astra review, round 3: "" slipped past a truthiness check here).
+  return (Array.isArray(batch?.resources) ? batch.resources : [])
+    .map((name) => String(name).toLowerCase()).filter((name) => name.trim());
+}
+
+function completedDurations(batches) {
+  return batches.filter((batch) => DONE_STATUSES.has(statusOf(batch))).map((batch) => {
+    const start = attemptStart(batch) || timestamp(batch.created_at);
+    const end = attemptEnd(batch);
+    return start && end > start ? end - start : 0;
+  }).filter(Boolean);
+}
+
+// The most batches the run has ever had going at once, from each batch's
+// latest attempt. It is the width the ETA assumes, because the orchestrator
+// that ran nine at once will run nine again after a lull. A pending batch has
+// no worker, whatever stamps a reset left on it.
+function peakConcurrency(batches) {
+  const edges = [];
+  for (const batch of batches) {
+    const status = statusOf(batch);
+    const start = attemptStart(batch);
+    if (!start || status === 'pending') continue;
+    const end = DONE_STATUSES.has(status) || STOPPED_STATUSES.has(status) ? attemptEnd(batch) : Infinity;
+    if (!(end > start)) continue;
+    edges.push([start, 1], [end, -1]);
+  }
+  edges.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let live = 0;
+  let peak = 0;
+  for (const [, delta] of edges) { live += delta; peak = Math.max(peak, live); }
+  return peak;
+}
+
+// A binary heap: the scheduler below pops the earliest finish and the
+// lowest queue position, so a large queue costs n log n instead of a full
+// rescan per finish (5,000 chained batches took 2s on the main thread before).
+function heap(less) {
+  const items = [];
+  const swap = (i, j) => { [items[i], items[j]] = [items[j], items[i]]; };
+  return {
+    get size() { return items.length; },
+    peek: () => items[0],
+    push(item) {
+      items.push(item);
+      for (let i = items.length - 1; i > 0;) {
+        const parent = (i - 1) >> 1;
+        if (!less(items[i], items[parent])) break;
+        swap(i, parent);
+        i = parent;
+      }
+    },
+    pop() {
+      const top = items[0];
+      const last = items.pop();
+      if (items.length) {
+        items[0] = last;
+        for (let i = 0; ;) {
+          const left = 2 * i + 1;
+          const right = left + 1;
+          let best = i;
+          if (left < items.length && less(items[left], items[best])) best = left;
+          if (right < items.length && less(items[right], items[best])) best = right;
+          if (best === i) break;
+          swap(i, best);
+          i = best;
+        }
+      }
+      return top;
+    },
+  };
+}
+
+// Remaining wall-clock time, scheduled the way the run actually executes:
+// every batch costs the average completed duration, at most `width` run at
+// once, a batch starts only when the batches it depends on are DONE, and a
+// batch that declares a resource waits while another holds it. The old rule
+// (average x remaining / active count) fell back to fully serial whenever
+// nothing happened to be active between waves, and never knew that a chain of
+// three dependent batches takes three durations however wide the run.
+// Null when the remaining work can never all finish: a dependency on a failed,
+// blocked or missing batch, or a cycle (a batch depending on itself included).
+function estimateRemainingMs(batches, avgMs, now) {
+  const order = new Map(batches.map((batch, index) => [String(batch.id), index]));
+  const remaining = batches.map((batch, index) => ({ batch, index }))
+    .filter(({ batch }) => !DONE_STATUSES.has(statusOf(batch)) && !STOPPED_STATUSES.has(statusOf(batch)));
+  if (!remaining.length) return 0;
+  const indegree = new Map();
+  const children = new Map();
+  for (const { batch, index } of remaining) {
+    indegree.set(index, 0);
+    for (const dep of (batch.depends_on || []).map(String)) {
+      if (dep === String(batch.id) || !order.has(dep)) return null;
+      const parent = batches[order.get(dep)];
+      if (DONE_STATUSES.has(statusOf(parent))) continue;
+      if (STOPPED_STATUSES.has(statusOf(parent))) return null;
+      indegree.set(index, indegree.get(index) + 1);
+      if (!children.has(order.get(dep))) children.set(order.get(dep), []);
+      children.get(order.get(dep)).push(index);
+    }
+  }
+  const active = remaining.filter(({ batch }) => statusOf(batch) === 'active');
+  const width = Math.max(1, active.length, peakConcurrency(batches));
+  const left = (batch) => {
+    if (statusOf(batch) !== 'active') return avgMs;
+    const since = attemptStart(batch);
+    const elapsed = since ? Math.max(0, now - since) : 0;
+    return Math.max(avgMs - elapsed, avgMs * OVERRUN_REMAINING_SHARE);
+  };
+  // An active batch whose own dependency is not done was started too early
+  // (a hand edit, a status update); simulating it as running would quietly
+  // break whatever chain it sits in, so the estimate is unknown instead.
+  if (active.some(({ index }) => indegree.get(index) > 0)) return null;
+  const running = heap((a, b) => a.end < b.end || (a.end === b.end && a.index < b.index));
+  const ready = heap((a, b) => a < b);
+  // A batch blocked by a held resource waits on that resource's own list,
+  // so a release looks at one waiter instead of rescanning every blocked
+  // batch (1,000 batches contending for one emulator cost a full rescan per
+  // finish). The lowest queue position among a free resource's waiters is
+  // always a start candidate, which keeps queue order exactly as before.
+  const waiters = new Map();
+  const held = new Map();
+  const promote = (name) => {
+    const queue = waiters.get(name);
+    if (queue?.size && !(held.get(name) > 0)) ready.push(queue.pop());
+  };
+  const hold = (batch, delta) => {
+    for (const name of resourcesOf(batch)) {
+      held.set(name, (held.get(name) || 0) + delta);
+      if (delta < 0 && held.get(name) === 0) promote(name);
+    }
+  };
+  for (const { batch, index } of active) { running.push({ end: left(batch), index }); hold(batch, 1); }
+  for (const { batch, index } of remaining) {
+    if (statusOf(batch) !== 'active' && indegree.get(index) === 0) ready.push(index);
+  }
+  let clock = 0;
+  let finished = 0;
+  while (finished < remaining.length) {
+    while (running.size < width && ready.size) {
+      const index = ready.pop();
+      const batch = batches[index];
+      const blocker = resourcesOf(batch).find((name) => held.get(name) > 0);
+      if (blocker !== undefined) {
+        if (!waiters.has(blocker)) waiters.set(blocker, heap((a, b) => a < b));
+        waiters.get(blocker).push(index);
+        // It may have been the start candidate for its other, free resources.
+        for (const name of resourcesOf(batch)) if (name !== blocker) promote(name);
+        continue;
+      }
+      running.push({ end: clock + left(batch), index });
+      hold(batch, 1);
+    }
+    if (!running.size) return null;
+    clock = running.peek().end;
+    while (running.size && running.peek().end <= clock) {
+      const { index } = running.pop();
+      finished += 1;
+      hold(batches[index], -1);
+      for (const child of children.get(index) || []) {
+        indegree.set(child, indegree.get(child) - 1);
+        if (indegree.get(child) === 0 && statusOf(batches[child]) !== 'active') ready.push(child);
+      }
+    }
+  }
+  return Math.round(clock);
+}
+
+// Who holds each declared resource right now: the active batches.
+function heldResources(batches) {
+  const held = new Map();
+  for (const batch of batches) {
+    if (statusOf(batch) !== 'active') continue;
+    for (const name of resourcesOf(batch)) if (!held.has(name)) held.set(name, String(batch.id));
+  }
+  return held;
+}
+
+// Why a pending batch is not running: everything it needs is done and free
+// (ready, so an idle one is the orchestrator's to dispatch), or it waits on
+// unfinished dependencies (missing ones count, as in the CLI) or on a resource
+// an active batch holds, named "<resource> (held by <batch>)".
+function pendingReadiness(batch, byId, held = new Map()) {
+  const waitingOn = (batch.depends_on || []).map(String).filter((id) => {
+    const dep = byId.get(id);
+    return !dep || !DONE_STATUSES.has(statusOf(dep));
+  });
+  for (const name of resourcesOf(batch)) {
+    if (held.has(name)) waitingOn.push(`${name} (held by ${held.get(name)})`);
+  }
+  return { ready: waitingOn.length === 0, waitingOn };
+}
+
 function summarizeQueue(queue, workspace, now = Date.now()) {
   if (!queue || !queue.workspace || !sameWorkspace(queue.workspace, workspace)) return null;
   const batches = Array.isArray(queue.batches) ? queue.batches : [];
@@ -91,20 +312,24 @@ function summarizeQueue(queue, workspace, now = Date.now()) {
     && !['blocked', 'failed', 'error'].includes(String(batch.status || '').toLowerCase())).length;
   const incomplete = batches.filter((batch) => !DONE_STATUSES.has(String(batch.status || '').toLowerCase()));
   const current = incomplete.sort((a, b) => batchUpdatedAt(b) - batchUpdatedAt(a))[0] || null;
-  const durations = completed.map((batch) => {
-    const start = timestamp(batch.started_at || batch.startedAt || batch.created_at);
-    const end = timestamp(batch.completed_at || batch.finished_at || batch.updated_at);
-    return start && end > start ? end - start : 0;
-  }).filter(Boolean);
+  const durations = completedDurations(batches);
+  const avgMs = durations.length ? durations.reduce((sum, value) => sum + value, 0) / durations.length : 0;
   const updatedAt = Math.max(timestamp(queue.updated_at), ...batches.map(batchUpdatedAt), 0);
-  const activeCount = batches.filter((batch) => String(batch.status || '').toLowerCase() === 'active').length;
+  const byId = new Map(batches.map((batch) => [String(batch.id), batch]));
+  const held = heldResources(batches);
+  const pending = batches.filter((batch) => statusOf(batch) === 'pending');
+  const ready = pending.filter((batch) => pendingReadiness(batch, byId, held).ready).length;
   // Two completed durations minimum: one sample extrapolated across the rest
   // of the queue is an invention wearing an average's clothes, and the whole
   // 2026-08-25 rework exists because this surface used to invent.
-  const etaMs = durations.length >= 2 && etaRemaining
-    ? Math.round((durations.reduce((sum, value) => sum + value, 0) / durations.length) * etaRemaining
-      / (Math.min(activeCount, etaRemaining) || 1))
-    : null;
+  const etaMs = durations.length >= 2 && etaRemaining ? estimateRemainingMs(batches, avgMs, now) : null;
+  const etaUnknown = etaMs != null || !etaRemaining ? null
+    : durations.length < 2 ? 'needs two finished batches'
+      : 'the dependencies cannot finish as recorded (failed, blocked, missing, circular, or a batch started before its dependency)';
+  // Active batches already past the average: the ETA charges each a quarter
+  // of it, which is a guess, so the surfaces say how many are running long.
+  const overrunning = durations.length >= 2 ? batches.filter((batch) => statusOf(batch) === 'active'
+    && attemptStart(batch) && now - attemptStart(batch) > avgMs).length : 0;
   const state = remaining === 0
     ? 'completed'
     : (updatedAt > 0 && now - updatedAt > RUN_STALE_MS ? 'abandoned' : 'live');
@@ -116,7 +341,12 @@ function summarizeQueue(queue, workspace, now = Date.now()) {
     remaining,
     currentBatchId: current?.id || null,
     workerEngine: current ? workerEngine(current) : null,
+    active: batches.filter((batch) => statusOf(batch) === 'active').length,
+    ready,
+    waiting: pending.length - ready,
+    overrunning,
     etaMs,
+    etaUnknown,
     updatedAt,
     state,
     // The pill is for orchestration that is HAPPENING. Pat's complaint was that
@@ -146,6 +376,8 @@ function eventForBatch(batch, events) {
 
 function joinBatchesToSessions(queue, indexRows = [], events = [], now = Date.now()) {
   const rows = Array.isArray(indexRows) ? indexRows : [];
+  const byId = new Map((queue?.batches || []).map((batch) => [String(batch.id), batch]));
+  const held = heldResources(queue?.batches || []);
   return (queue?.batches || []).map((batch) => {
     const status = String(batch.status || 'pending').toLowerCase();
     const dispatchedAt = timestamp(batch.last_dispatched_at || batch.started_at);
@@ -167,7 +399,11 @@ function joinBatchesToSessions(queue, indexRows = [], events = [], now = Date.no
     const signalAgeMs = signalAt ? Math.max(0, now - signalAt) : null;
     const signalSource = transcriptSignal >= eventSignal && transcriptSignal ? 'transcript' : eventSignal ? 'event' : null;
     let workerState = null;
-    if (DONE_STATUSES.has(status)) workerState = 'done';
+    let waitingOn = null;
+    if (status === 'pending') {
+      ({ waitingOn } = pendingReadiness(batch, byId, held));
+      workerState = waitingOn.length ? 'waiting' : 'ready';
+    } else if (DONE_STATUSES.has(status)) workerState = 'done';
     else if (['blocked', 'failed', 'error'].includes(status)) workerState = 'error-blocked';
     else if (status === 'active') {
       const eventSaysFinished = /\b(finished|worker done|exited|completed)\b/i.test(String(event?.msg || ''));
@@ -180,6 +416,7 @@ function joinBatchesToSessions(queue, indexRows = [], events = [], now = Date.no
       batchId: batch.id,
       sessionId: session?.id || batch.last_session_id || null,
       workerState,
+      waitingOn,
       signalAt: signalAt || null,
       signalAgeMs,
       signalSource,
@@ -208,7 +445,10 @@ function refineSummary(summary, joined = []) {
     : counts.awaitingReview ? 'awaiting-review' : counts.missing ? 'no-signal' : null;
   const current = joined.filter((row) => row.workerState === currentState)
     .sort((a, b) => (a.signalAgeMs ?? Infinity) - (b.signalAgeMs ?? Infinity))[0] || null;
-  const stateWord = counts.quiet ? 'quiet' : counts.working ? 'working' : counts.awaitingReview ? 'awaiting review' : counts.missing ? 'no signal' : summary.state;
+  // Nothing running while batches are ready is the run sitting idle, which is
+  // exactly what the pill must say rather than a bare "live".
+  const idleReady = summary.ready && summary.state === 'live' ? 'ready, not started' : null;
+  const stateWord = counts.quiet ? 'quiet' : counts.working ? 'working' : counts.awaitingReview ? 'awaiting review' : counts.missing ? 'no signal' : idleReady || summary.state;
   return { ...summary, ...counts, currentState: current?.workerState || null, stateWord,
     signalAgeMs: current?.signalAgeMs ?? null, signal: current ? formatSignalAge(current.signalAgeMs) : null };
 }

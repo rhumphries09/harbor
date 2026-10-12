@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { projectRootSessionId } from '../../shared/sidebar-model.js';
 import { folderLabel } from '../folder-label.cjs';
+import { etaText, runCounts, waitingText } from './orch-text.cjs';
 
 const STATUS_COLORS = {
   pending: 'orch-status-pending',
@@ -14,13 +15,14 @@ function StatusDot({ status }) {
   return <span className={`orch-status-dot ${STATUS_COLORS[status] || 'orch-status-pending'}`} aria-label={status} />;
 }
 
-function formatEta(ms) {
-  if (!ms) return null;
-  const minutes = Math.max(1, Math.round(ms / 60000));
-  if (minutes < 60) return `about ${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  return `about ${hours}h${rest ? ` ${rest}m` : ''}`;
+// The events column is 44px wide, sized for a clock time. The raw ISO stamp
+// wrapped onto three lines there; it now rides in the tooltip instead.
+function eventStamp(value, full = false) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || '');
+  return full
+    ? date.toLocaleString()
+    : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
 function BatchCard({ batch, onPreview, previewText, previewLoading }) {
@@ -31,6 +33,8 @@ function BatchCard({ batch, onPreview, previewText, previewLoading }) {
   const lastEvent = batch.notes || batch.last_error;
   const stateLabel = batch.workerState === 'quiet'
     ? `quiet ${Math.max(1, Math.floor(batch.signalAgeMs / 60000))}m, possibly hung`
+    : batch.workerState === 'ready' ? 'ready, not started'
+    : batch.workerState === 'waiting' ? 'waiting'
     : batch.workerState === 'awaiting-review' ? 'awaiting review'
       : batch.workerState === 'error-blocked' ? 'error / blocked'
         : batch.workerState === 'no-signal' ? 'no liveness signal'
@@ -57,7 +61,10 @@ function BatchCard({ batch, onPreview, previewText, previewLoading }) {
       <div className="orch-batch-meta">
         {batch.worker && <span className="orch-batch-worker" title={batch.worker}>{batch.worker}</span>}
         {batch.worker_engine && <span>{batch.worker_engine}</span>}
-        {batch.signalAgeMs != null && <span>{`last signal ${batch.signalAgeMs < 60000 ? 'now' : `${Math.max(1, Math.floor(batch.signalAgeMs / 60000))}m ago`}`}</span>}
+        {batch.workerState === 'waiting' && (
+          <span title={`waits on ${(batch.waitingOn || []).join(', ')}`}>{waitingText(batch.waitingOn)}</span>
+        )}
+        {batch.signalAgeMs != null && batch.status !== 'pending' && <span>{`last signal ${batch.signalAgeMs < 60000 ? 'now' : `${Math.max(1, Math.floor(batch.signalAgeMs / 60000))}m ago`}`}</span>}
         {batch.signalAgeMs == null && batch.status === 'active' && <span>no liveness signal</span>}
         {batch.seat && <span>{`seat ${batch.seat}`}</span>}
         {batch.updated_at && (
@@ -224,7 +231,10 @@ export function OrchPanel({ project, onClose }) {
         <div className="orch-section orch-events-section">
           <h3 className="orch-section-label">Events</h3>
           <div className="orch-events-list">{data.events.map((event, index) => (
-            <div className="orch-event-row" key={`${event.t}-${index}`}><time>{event.t}</time><span>{event.msg}</span></div>
+            <div className="orch-event-row" key={`${event.t}-${index}`}>
+              <time dateTime={event.t} title={eventStamp(event.t, true)}>{eventStamp(event.t)}</time>
+              <span>{event.msg}</span>
+            </div>
           ))}</div>
         </div>
       )}
@@ -239,7 +249,8 @@ export function OrchPanel({ project, onClose }) {
         {data?.summary && (
           <div className="orch-eta" role="status">
             <span>{`${data.summary.done}/${data.summary.total} complete`}</span>
-            {formatEta(data.summary.etaMs) ? <span>{`rough ETA: ${formatEta(data.summary.etaMs)}`}</span> : null}
+            {runCounts(data.summary) ? <span>{runCounts(data.summary)}</span> : null}
+            {etaText(data.summary) ? <span>{etaText(data.summary)}</span> : null}
           </div>
         )}
         {!data && !error && <p className="orch-loading">Loading...</p>}
