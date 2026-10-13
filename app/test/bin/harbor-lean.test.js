@@ -120,6 +120,35 @@ test('a saved Lean OpenAI sends general work to the emptiest seat; --json carrie
   assert.deepEqual([json.cursor.label, json.cursor.monthlyPct], ['Cursor', null]);
 });
 
+// The 2026-10-08 miss: Studio at 97% with a reset waiting, every other seat
+// capped, and the session read "every GPT seat is at least 90% used" and kept
+// the work on Claude. Seats now carry their reset credits.
+test('a seat holding a reset is shown, flagged, and takes the work (2026-10-13)', (t) => {
+  const root = home(t, {});
+  const file = path.join(root, 'lean.json');
+  fs.writeFileSync(file, JSON.stringify({ mode: 'lean-openai', updatedAt: new Date().toISOString() }));
+  const fixture = path.join(root, 'plans.json');
+  const updatedAt = new Date(Date.now() - 60000).toISOString();
+  const codex = (label, usedPct, resets) => ({ provider: 'codex', id: `codex:${label}`, label, email: `${label.toLowerCase()}@example.com`,
+    windows: [{ kind: 'weekly', usedPct, resetsAt: null }], resets, updatedAt, source: 'endpoint' });
+  fs.writeFileSync(fixture, JSON.stringify({ generatedAt: updatedAt, plans: [
+    codex('Default', 100, { available: 0, nextExpiresAt: null }),
+    codex('Studio', 97, { available: 1, nextExpiresAt: Math.floor(Date.parse('2026-10-29T12:00:00Z') / 1000) }),
+    codex('Work', 100, null),
+  ] }));
+  const r = run(root, { HARBOR_PROVIDER_LEAN_FILE: file, HARBOR_PLAN_USAGE_FIXTURE: fixture });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /GPT seats this week: Default 100% \(capped\), 0 resets, read 1m ago; Studio 97%, 1 reset waiting \(next expires Oct 29\), read 1m ago; Work 100% \(capped\), resets unknown, read 1m ago/);
+  assert.match(r.stdout, /Reset waiting: Studio is 97% used and has 1 reset\. When it runs out, apply one with (node C:\/tools\/gpt-reset\/gpt-reset\.mjs apply --plan studio@example\.com|the plan's ChatGPT Settings, Usage page), before any of its work goes to Claude\./);
+  assert.doesNotMatch(r.stdout, /Reset waiting: (Default|Work)/);
+  assert.match(r.stdout, /Everything else: Studio \(97% used this week, 1 reset waiting\)\./);
+  const task = run(root, { HARBOR_PROVIDER_LEAN_FILE: file, HARBOR_PLAN_USAGE_FIXTURE: fixture }, ['--task', 'general']);
+  assert.match(task.stdout, /^general: GPT seat Studio \(Studio is 97% used but has 1 reset waiting; apply one when it runs out\)\r?\n/);
+  const json = JSON.parse(run(root, { HARBOR_PROVIDER_LEAN_FILE: file, HARBOR_PLAN_USAGE_FIXTURE: fixture }, ['--json']).stdout);
+  assert.deepEqual(json.seats.map((s) => [s.label, s.weeklyPct, s.resetsAvailable]), [['Default', 100, 0], ['Studio', 97, 1], ['Work', 100, null]]);
+  assert.equal(json.seats[1].resetExpiresAt, '2026-10-29T12:00:00.000Z');
+});
+
 test('Claude only needs no seats at all', (t) => {
   const root = home(t, {});
   const file = path.join(root, 'lean.json');

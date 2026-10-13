@@ -440,6 +440,11 @@ function createPlanUsageProvider({
         reason,
       };
     }));
+    const [claudePlans, codexPlans, cursor] = await Promise.all([plans, allCodexPlans(time), cursorPlan()]);
+    return { generatedAt: new Date(now()).toISOString(), plans: [...claudePlans, ...codexPlans, cursor] };
+  }
+
+  async function allCodexPlans(time, withHome = false) {
     const homes = await discoverCodexHomes({ io, home, env, profiles, platform });
     const stores = await Promise.all(homes.map(async (dir) => {
       try {
@@ -450,14 +455,20 @@ function createPlanUsageProvider({
       }
     }));
     const shared = (store) => !!store && stores.filter((other) => other === store).length > 1;
-    const [claudePlans, codexPlans, cursor] = await Promise.all([
-      plans,
-      Promise.all(homes.map((dir, index) => codexPlan(dir, time, shared(stores[index])))),
-      cursorPlan(),
-    ]);
-    return { generatedAt: new Date(now()).toISOString(), plans: [...claudePlans, ...codexPlans, cursor] };
+    return Promise.all(homes.map(async (dir, index) => {
+      const plan = await codexPlan(dir, time, shared(stores[index]));
+      return withHome ? { ...plan, home: dir } : plan;
+    }));
   }
   return {
+    // Codex plans alone, for bin/harbor-lean: the same reads the dropdown makes
+    // (a rollout under three minutes old, else the usage endpoint) plus each
+    // plan's reset credits, with no Claude or Cursor reads. Each plan also names
+    // its codex home here, which the dropdown payload deliberately does not.
+    async getCodexPlans() {
+      if (env.HARBOR_PLAN_USAGE_FIXTURE) return (await collect()).plans.filter((p) => p.provider === 'codex');
+      return allCodexPlans(now(), true);
+    },
     // Cursor alone, for bin/harbor-lean's mechanical-work route: one read-only
     // request to Cursor's own usage endpoint, no Claude or Codex reads.
     async getCursorPlan() {

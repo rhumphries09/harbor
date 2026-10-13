@@ -158,16 +158,49 @@ test('Cursor comes from the same plan-usage payload, monthly window only', () =>
   assert.equal(cursorFromPlans(undefined), null);
 });
 
-test('seats come from the codex plans of the plan-usage payload, weekly window only', () => {
+test('seats come from the codex plans of the plan-usage payload, weekly window and reset credits only', () => {
   const plans = [
     { provider: 'claude', label: 'Default', windows: [{ kind: 'weekly', usedPct: 99 }] },
-    { provider: 'codex', label: 'Default', windows: [{ kind: 'fiveHour', usedPct: 80 }, { kind: 'weekly', usedPct: 100 }] },
-    { provider: 'codex', label: 'Work', windows: [{ kind: 'fiveHour', usedPct: 3 }] },
-    { provider: 'codex', label: 'Pro', unavailable: true, windows: [{ kind: 'weekly', usedPct: 5 }] },
+    { provider: 'codex', label: 'Default', windows: [{ kind: 'fiveHour', usedPct: 80 }, { kind: 'weekly', usedPct: 100 }], resets: { available: 2, nextExpiresAt: 1 } },
+    { provider: 'codex', label: 'Work', windows: [{ kind: 'fiveHour', usedPct: 3 }], resets: { available: 0, nextExpiresAt: null } },
+    { provider: 'codex', label: 'Pro', unavailable: true, windows: [{ kind: 'weekly', usedPct: 5 }], resets: null },
+    { provider: 'codex', label: 'Odd', windows: [{ kind: 'weekly', usedPct: 5 }], resets: { available: -1 } },
     { provider: 'cursor', label: 'Cursor', windows: [{ kind: 'monthly', usedPct: 1 }] },
   ];
   assert.deepEqual(seatsFromPlans(plans), [
-    { label: 'Default', weeklyPct: 100 }, { label: 'Work', weeklyPct: null }, { label: 'Pro', weeklyPct: null },
+    { label: 'Default', weeklyPct: 100, resetsAvailable: 2 },
+    { label: 'Work', weeklyPct: null, resetsAvailable: 0 },
+    { label: 'Pro', weeklyPct: null, resetsAvailable: null },
+    { label: 'Odd', weeklyPct: 5, resetsAvailable: null },
   ]);
   assert.deepEqual(seatsFromPlans(undefined), []);
+});
+
+// Pat's standing rule (2026-09-16): a GPT seat that is out but holds a reset is
+// not out; spend the reset before the work goes to Claude. On Oct 1 and Oct 8
+// Studio sat capped with a reset while its work went to Claude.
+test('a seat with a reset waiting is not out: it takes the work when no seat has room (2026-10-13)', () => {
+  const withReset = (label, weeklyPct, resetsAvailable) => ({ label, weeklyPct, resetsAvailable });
+  const OCT8 = [withReset('Default', 100, 0), withReset('Studio', 97, 1), withReset('Work', 100, 0)];
+  for (const mode of ['lean-claude', 'balanced', 'lean-openai']) {
+    const image = leanRoute(mode, 'image', OCT8);
+    assert.deepEqual([image.side, image.seat.label], ['gpt', 'Studio'], mode);
+    assert.equal(image.reason, 'Studio is 97% used but has 1 reset waiting; apply one when it runs out.');
+  }
+  assert.equal(leanRoute('lean-openai', 'general', OCT8).seat.label, 'Studio');
+  // Balanced: a capped seat WITHOUT a reset still keeps large jobs home (Pat, 2026-10-05).
+  assert.equal(leanRoute('balanced', 'general', OCT8, { large: true }).reason, 'Default, Work are capped.');
+  // A capped seat WITH a reset is not "capped", and takes the large job when nothing is under 50%.
+  const tight = [withReset('Work', 62, 0), withReset('Studio', 100, 2)];
+  const large = leanRoute('balanced', 'general', tight, { large: true });
+  assert.deepEqual([large.side, large.seat.label, large.reason], ['gpt', 'Studio', 'Studio is 100% used but has 2 resets waiting; apply one when it runs out.']);
+  // A seat with room by its weekly number still comes first; no reset is spent for nothing.
+  assert.equal(leanRoute('balanced', 'general', [withReset('Work', 12, 0), withReset('Studio', 97, 1)], { large: true }).seat.label, 'Work');
+  assert.equal(leanRoute('lean-openai', 'general', [withReset('Work', 40, 0), withReset('Studio', 30, 1)]).reason, 'Heavy lifting leans OpenAI.');
+  // Zero or unknown resets change nothing.
+  for (const resets of [0, null, undefined, -1, 1.5]) {
+    assert.equal(leanRoute('lean-openai', 'general', [withReset('A', 95, resets)]).side, 'claude', String(resets));
+  }
+  // The Right now row says the reset is there.
+  assert.deepEqual(leanVerdict('lean-claude', OCT8, CURSOR).rows[0], { label: 'Image work', target: 'Studio', note: '97% used this week, 1 reset waiting' });
 });

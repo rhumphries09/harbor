@@ -116,11 +116,26 @@ function pctText(pct) {
 
 const finitePct = (value) => typeof value === 'number' && Number.isFinite(value);
 
+const hasReset = (seat) => Number.isSafeInteger(seat.resetsAvailable) && seat.resetsAvailable > 0;
+
+// A seat holding a reset is not out (Pat's standing rule, 2026-09-16: spend a
+// GPT plan's resets before any of its work goes to Claude), so it never counts
+// as capped, and when no seat has room by its weekly number the emptiest seat
+// with a reset is the `spare`: the work goes there and the reset is applied
+// when the seat actually runs out. Until 2026-10-13 resets were invisible here
+// and a capped seat with one waiting sent its work to Claude.
 function seatFacts(seats) {
   const known = (Array.isArray(seats) ? seats : []).filter((seat) => seat && finitePct(seat.weeklyPct));
-  const best = known.slice().sort((a, b) => a.weeklyPct - b.weeklyPct)[0] || null;
-  const capped = known.filter((seat) => seat.weeklyPct >= 100);
-  return { best, capped, open: best && best.weeklyPct < GPT_MAX_PCT ? best : null };
+  const byPct = (a, b) => a.weeklyPct - b.weeklyPct;
+  const best = known.slice().sort(byPct)[0] || null;
+  const capped = known.filter((seat) => seat.weeklyPct >= 100 && !hasReset(seat));
+  const spare = known.filter(hasReset).sort(byPct)[0] || null;
+  return { best, capped, spare, open: best && best.weeklyPct < GPT_MAX_PCT ? best : null };
+}
+
+function spareReason(seat) {
+  const n = seat.resetsAvailable;
+  return `${seat.label} is ${pctText(seat.weeklyPct)} used but has ${n} reset${n === 1 ? '' : 's'} waiting; apply one when it runs out.`;
 }
 
 // One task's route. seats: [{ label, weeklyPct }] for the codex homes; cursor:
@@ -132,7 +147,7 @@ function seatFacts(seats) {
 function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex = false } = {}) {
   const id = normalizeLean(mode);
   const kind = taskKind(kindId);
-  const { best, capped, open } = seatFacts(seats);
+  const { best, capped, open, spare } = seatFacts(seats);
   const claude = (reason) => ({ side: 'claude', seat: null, kind: kind.id, reason });
   const gpt = (seat, reason) => ({ side: 'gpt', seat, kind: kind.id, reason });
   if (id === 'claude-only') return claude('Heavy lifting is Claude only.');
@@ -152,6 +167,7 @@ function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex 
   }
   if (kind.side === 'gpt' || id === 'lean-openai') {
     if (open) return gpt(open, kind.side === 'gpt' ? kind.why : 'Heavy lifting leans OpenAI.');
+    if (spare) return gpt(spare, spareReason(spare));
     return claude(best ? `Every GPT seat is at least ${GPT_MAX_PCT}% used.` : 'No GPT seat usage is known.');
   }
   if (id === 'lean-claude') return claude('Heavy lifting leans Claude.');
@@ -159,13 +175,17 @@ function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex 
   if (!large) return claude('Small and medium general work stays on Claude.');
   if (!best) return claude('No GPT seat usage is known.');
   if (capped.length) return claude(`${capped.map((seat) => seat.label).join(', ')} ${capped.length === 1 ? 'is' : 'are'} capped.`);
-  if (best.weeklyPct >= BALANCED_MAX_PCT) return claude(`Every GPT seat is at least ${BALANCED_MAX_PCT}% used.`);
-  return gpt(best, 'Large general jobs may use a GPT seat with room.');
+  if (best.weeklyPct < BALANCED_MAX_PCT) return gpt(best, 'Large general jobs may use a GPT seat with room.');
+  if (spare) return gpt(spare, spareReason(spare));
+  return claude(`Every GPT seat is at least ${BALANCED_MAX_PCT}% used.`);
 }
 
 // Where a route lands, as a row: { label, target, note }.
 function routeRow(label, route) {
-  if (route.side === 'gpt') return { label, target: route.seat.label, note: `${pctText(route.seat.weeklyPct)} used this week` };
+  if (route.side === 'gpt') {
+    const n = hasReset(route.seat) ? route.seat.resetsAvailable : 0;
+    return { label, target: route.seat.label, note: `${pctText(route.seat.weeklyPct)} used this week${n ? `, ${n} reset${n === 1 ? '' : 's'} waiting` : ''}` };
+  }
   if (route.side === 'cursor') return { label, target: route.seat.label || 'Cursor', note: `${pctText(route.seat.monthlyPct)} used this month` };
   return { label, target: 'Claude', note: null };
 }
@@ -216,15 +236,18 @@ function leanVerdict(mode, seats, cursor = null) {
   return { gpt, seat, rows, summary };
 }
 
-// The weekly window of each codex plan, in the shape plan-usage.js returns.
+// The weekly window and reset credits of each codex plan, in the shape
+// plan-usage.js returns.
 function seatsFromPlans(plans) {
   return (Array.isArray(plans) ? plans : [])
     .filter((plan) => plan && plan.provider === 'codex')
     .map((plan) => {
       const weekly = (plan.windows || []).find((w) => w && w.kind === 'weekly');
+      const available = plan.resets && plan.resets.available;
       return {
         label: plan.label,
         weeklyPct: plan.unavailable || !weekly ? null : weekly.usedPct,
+        resetsAvailable: Number.isSafeInteger(available) && available >= 0 ? available : null,
       };
     });
 }

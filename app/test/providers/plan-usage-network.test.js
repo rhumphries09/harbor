@@ -158,6 +158,35 @@ test('plan-usage-network keeps fresh local usage and only reads reset credits', 
   f.clean(result);
 });
 
+// bin/harbor-lean's read (2026-10-13): the dropdown's Codex reads and reset
+// credits, no Claude or Cursor request, and each plan names its home there only.
+test('plan-usage-network getCodexPlans reads only Codex, with resets, and names each home', async (t) => {
+  const f = fixture(t);
+  f.codex('.codex');
+  f.codex('.codex-extra');
+  f.local('.codex', 600_000, 91);
+  f.cursor();
+  f.dispatch((url) => {
+    assert.ok([USAGE, RESETS].includes(url), url);
+    return response(url === USAGE ? endpointBody(97) : { available_count: 1, credits: [{ id: 'c1', status: 'available', expires_at: new Date(NOW + 86_400_000).toISOString() }] });
+  });
+  const claude = { getUsage: async () => assert.fail('harbor-lean never reads Claude usage') };
+  const rows = await f.provider({ usageProvider: claude }).getCodexPlans();
+  assert.deepEqual(rows.map((row) => [row.label, path.basename(row.home), row.windows.find((w) => w.kind === 'weekly').usedPct, row.resets.available]),
+    [['Default', '.codex', 97, 1], ['Extra', '.codex-extra', 97, 1]]);
+  assert.equal(rows[0].resets.nextExpiresAt, (NOW + 86_400_000) / 1000);
+  assert.ok(f.calls.every((call) => call.url !== CURSOR));
+  f.clean(rows);
+  // The dropdown payload keeps no home path.
+  f.dispatch((url) => {
+    if (url === CURSOR) return response({ planUsage: { totalPercentUsed: 1 } });
+    return response(url === USAGE ? endpointBody(97) : { available_count: 0 });
+  });
+  f.advance(61_000);
+  const plans = (await f.provider({ usageProvider: { getUsage: async () => ({}) } }).getPlans()).plans;
+  assert.ok(plans.filter((row) => row.provider === 'codex').every((row) => !('home' in row)));
+});
+
 test('plan-usage-network skips expired access tokens for both providers without refreshing them', async (t) => {
   const f = fixture(t);
   f.codex('.codex', NOW / 1000);
