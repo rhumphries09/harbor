@@ -1,0 +1,21 @@
+● Short version                                                                                                         
+  - A bug to fix: the second reader skips two columns of the input file.                                                
+  - The plan list is out of date by about 260 entries.                                                                  
+                                                                                                                        
+  Your calls                                                                                                            
+  1. Should I fix the reader bug and ship it?                                                                           
+  2. Who tells the owner about the wrong totals, you or me?                                                             
+  3. Should I add the two people listed in the template but missing from the directory?                                 
+                                                                                                                        
+✻ Churned for 4s · done 6:16 PM                                                                                         
+                                                                                                                        
+                                                                                             ctrl+g to edit in Notepad  
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 1. yes - ship the fix for the second reader. we already have a full tool that knows this format, so feel free         
+  to reuse it
+  2. dont worry about cleaning up the old workbook or its totals - they should move to the new app and i will take      
+  feedback that way.                                                                                                    
+  3. sure you can add them
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  team  ·  Opus 5.5  ·  my-project  ·  ctx 36%  ·  5h 5%  ·  wk 40%  ·  $12.14
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

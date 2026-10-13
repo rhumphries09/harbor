@@ -2645,6 +2645,63 @@ test('a dialog whose selected row starts with the pointer still gets a panel', a
   assert.ok(menu.screen.join('\n').includes('Rewind'));
 });
 
+// Live-caught 2026-10-13: Pat answered three numbered questions with "1. yes
+// ... 2. ... 3. ...", so Claude's prompt line read "❯ 1. yes - ...", which is a
+// menu's selected row. The send stopped with "a prompt appeared in the session
+// while Harbor was typing", the answer panel offered keys over his own draft,
+// its Enter submitted it, and the retry typed it again: Claude got it twice.
+// Real 2.1.296 screens (idle, and mid-turn), words replaced.
+test('a draft that starts with a numbered list is not a question', async () => {
+  for (const name of ['idle-composer-numbered-draft-2.1.296.txt', 'working-turn-numbered-draft-2.1.296.txt']) {
+    for (const blockedHint of [false, true]) {
+      const h = makeHarness({ panes: ['pane-1'] });
+      h.deps.readPane = async () => composerFixture(name);
+      const send = createSessionSend(h.deps);
+      assert.equal(await send.getMenu({ pane: { paneId: 'pane-1', workspaceId: 'ws-1' }, blockedHint }), null,
+        `${name} (blocked hint ${blockedHint}) is a prompt with a draft in it`);
+    }
+  }
+});
+
+test('a numbered message is typed, shown, and submitted once', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h);
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  const short = '1. yes, ship it\n2. dont clean up the old workbook\n3. sure you can add them';
+  await send.send({ sessionId: 's-numbered', text: short, pane: target });
+  assert.deepEqual(typed(h), [`\x1b[200~${short}\x1b[201~`, '\r']);
+  assert.equal(pane.draft, '');
+  // Too tall for its prompt line to be in the ten-line tail, sent while the
+  // first one is echoed above the box as "❯ 1. yes, ship it".
+  const tall = Array.from({ length: 12 }, (_, i) => `${i + 1}. item number ${i + 1}`).join('\n');
+  await send.send({ sessionId: 's-numbered', text: tall, pane: target });
+  assert.deepEqual(typed(h).slice(2), [`\x1b[200~${tall}\x1b[201~`, '\r']);
+  assert.equal(pane.draft, '');
+});
+
+test('a menu row under a divider is still a question when nothing closes it', async () => {
+  // AskUserQuestion draws "Chat about this" directly under a divider, the one
+  // menu row shaped like a prompt line. Real capture with the pointer moved.
+  const asked = fs.readFileSync(path.join(__dirname, '../fixtures/askuserquestion/real-claude-120x60.txt'), 'utf8')
+    .split('\n')
+    .map((line) => line.replace(/^❯(\s*1\.)/, ' $1').replace(/^ {2}(5\. Chat about this)/, '❯ $1'))
+    .join('\n');
+  assert.match(asked, /^❯ 5\. Chat about this/m);
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1', promptEchoes: false, readFrames: [asked] });
+  const send = createSessionSend(h.deps);
+  assert.ok(await send.getMenu({ pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }), 'the question gets its card');
+  await assert.rejects(send.send({ sessionId: 's-asked', text: 'continue', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }));
+  assert.ok(!typed(h).includes('\r'), 'no Enter into a live question');
+
+  // The parser does not know this one, so only the classifier stands between
+  // it and a dead end: a divider above a pointer row is not a prompt box.
+  const novel = ['Pick a look', PROMPT_RULE, '❯ 1. Dark', '  2. Light', '', ' Syntax theme: plain (ctrl+t to disable)'].join('\n');
+  const n = makeHarness({ panes: ['pane-1'] });
+  n.deps.readPane = async () => novel;
+  assert.ok((await createSessionSend(n.deps).getMenu({ pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }))?.fallback);
+});
+
 test('a real dialog question on its own line still counts as blocked', async () => {
   const h = makeHarness({ panes: ['pane-1'] });
   h.deps.readPane = async () => [

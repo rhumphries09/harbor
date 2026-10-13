@@ -147,6 +147,31 @@ function isComposerLine(lines, i) {
   return isDividerLine(lines[i - 1]);                 // else require the box edge
 }
 
+// A DRAFT THAT STARTS WITH A NUMBER IS STILL A DRAFT (2026-10-13, Pat: "whats
+// this bug?"). He answered three numbered questions with "1. yes ... 2. ...
+// 3. ...", so the prompt line read "❯ 1. yes - do we need", which is exactly a
+// menu's selected row. isComposerLine refused it for that reason, the pointer
+// row test called the pane blocked, and the send stopped with "a prompt
+// appeared in the session while Harbor was typing" 0.2 s after typing. The
+// answer panel then offered keys over his own draft; its Enter submitted the
+// message, and the retry typed it a second time, so Claude got it twice.
+//
+// The whole box decides, not the first line: Claude's prompt is the last two
+// dividers on screen with the glyph line directly under the top one, and the
+// tail under the bottom one is only its status lines. A menu row can sit under
+// a divider (AskUserQuestion's "Chat about this" does, in every capture), but
+// nothing closes it from below. This also covers a draft too tall for the
+// prompt line to be in the ten-line tail, where the draft's own words ("Do you
+// want", "Enter to confirm") used to read as dialog chrome. Dialog keys UNDER
+// the box mean it is not the prompt, which leaves the older tests in charge.
+// Fixtures: test/fixtures/composer-vs-dialog/*-numbered-draft-2.1.296.txt.
+function endsAtPrompt(lines, tailLength) {
+  const found = composerBox(lines.join('\n'));
+  if (!found || found.bottom < lines.length - tailLength) return false;
+  const under = lines.slice(found.bottom + 1).join('\n');
+  return !BLOCKED_CHROME_RE.test(under) && !DIALOG_CANCEL_RE.test(under);
+}
+
 // AN ENTER IS NOT A SUBMISSION (2026-09-23). Two image sends into a session
 // with a 48MB transcript typed their text and image into Claude's composer and
 // neither Enter submitted; both messages sat there until a third send's Enter
@@ -1310,6 +1335,7 @@ function createSessionSend(deps) {
     const bottom = bottomLines.join('\n');
     const lastText = [...bottomLines].reverse().find((line) => line.trim()) || '';
     const resolved = bottomLines.some((_line, i) => isComposerLine(bottomLines, i))
+      || endsAtPrompt(lines, bottomLines.length)
       || /esc to interrupt/i.test(bottom)
       || SHELL_PROMPT_TAIL_RE.test(lastText); // a bare shell prompt: claude exited, status lags
     if (resolved) return null;
