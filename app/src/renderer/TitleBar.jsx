@@ -6,6 +6,7 @@ import { MemoryChip } from './MemoryChip.jsx';
 import { armedConfirmClick, DISARM_MS } from './armed-confirm.cjs';
 import { ago, formatWindow, formatResets } from './plan-usage-format.cjs';
 import { LEAN_MODES, leanMode, leanVerdict, seatsFromPlans, cursorFromPlans } from '../shared/provider-lean.cjs';
+import { providerIdentity } from './providers.js';
 
 // "Heavy lifting": how much Claude sessions may hand to GPT seats. Saved by main
 // (providers/provider-lean.js) and read by sessions before they launch Astra or
@@ -174,10 +175,18 @@ export function PlanUsageButton() {
           {error ? <p className="plan-usage-message" role="alert">{error}</p> : null}
           {!data ? <p className="plan-usage-message">{busy ? 'Reading plan usage...' : 'Usage unavailable'}</p> : null}
           {data && !data.plans.length ? <p className="plan-usage-message">No plans found.</p> : null}
+          {/* One boxed group per provider, headed by its logo, so a plan name
+              that exists on two providers (an account with both a Claude and
+              a Codex plan) reads as two different things (Pat, 2026-10-13). */}
           {['claude', 'codex', 'cursor'].map((provider) => {
             const plans = data?.plans.filter((p) => p.provider === provider) || [];
-            return plans.length ? <section key={provider} aria-label={`${provider} plans`}>
-              <h3 className="plan-usage-provider">{{ claude: 'Claude', codex: 'Codex', cursor: 'Cursor' }[provider]}</h3>
+            const identity = providerIdentity(provider);
+            return plans.length ? <section key={provider} className="plan-usage-group" aria-label={`${provider} plans`}>
+              <h3 className="plan-usage-provider">
+                <img src={identity.logo} alt="" aria-hidden="true" />
+                <span>{identity.label}</span>
+                <span className="plan-usage-count">{plans.length} {plans.length === 1 ? 'plan' : 'plans'}</span>
+              </h3>
               {plans.map((plan) => {
                 const freshness = [];
                 if (plan.unavailable) freshness.push('Unavailable');

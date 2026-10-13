@@ -87,6 +87,20 @@ async function host() {
     const content = await evaluate(`document.querySelector('.plan-usage-menu').textContent`);
     for (const expected of ['Claude', 'Codex', 'Cursor', 'Week 53%', 'Resets left: 2', 'Resets left: unknown', 'Stale', 'Unavailable', 'Included <1%']) assert.ok(content.includes(expected), expected);
     assert.ok(!content.includes('$'), 'no visible dollar ratio beside the Cursor percentage');
+    // One boxed group per provider, each headed by its logo, name and plan count;
+    // the Claude "Default" and the Codex "Default" land in different groups.
+    const groups = await evaluate(`[...document.querySelectorAll('.plan-usage-scroll > .plan-usage-group')].map((g) => {
+      const img = g.querySelector('.plan-usage-provider img');
+      return { head: g.querySelector('.plan-usage-provider').textContent, logo: !!img && img.complete && img.getBoundingClientRect().width === 15,
+        rows: [...g.querySelectorAll('.plan-usage-row strong')].map((s) => s.textContent), boxed: getComputedStyle(g).borderTopStyle === 'solid' && parseFloat(getComputedStyle(g).borderTopWidth) > 0 };
+    })`);
+    assert.deepEqual(groups, [
+      { head: 'Claude3 plans', logo: true, rows: ['Default', 'Research', 'Writing'], boxed: true },
+      { head: 'Codex2 plans', logo: true, rows: ['Default', 'Projects'], boxed: true },
+      { head: 'Cursor1 plan', logo: true, rows: ['Cursor'], boxed: true },
+    ]);
+    assert.equal(await evaluate(`document.querySelectorAll('.plan-usage-row').length === document.querySelectorAll('.plan-usage-group .plan-usage-row').length`), true, 'every plan sits inside its provider group');
+    await shot('groups');
     const cursorTooltip = await evaluate(`document.querySelector('section[aria-label="cursor plans"] .plan-usage-window').title`);
     for (const expected of ['Included <1% used', 'Auto 0% used', 'API <1% used']) assert.ok(cursorTooltip.includes(expected), expected);
     assert.equal(reads, 1);
@@ -209,7 +223,7 @@ async function host() {
     await waitFor(`!!document.querySelector('.plan-usage-message[role=alert]')`);
     await shot('refresh-error');
     assert.equal(await evaluate(`document.querySelectorAll('.plan-usage-row').length`), 6);
-    const report = { result: 'PASS', reads, wide: '1440x1000', narrow: '960x800', checks: ['portal', 'six plans', 'weekly-only Codex', 'known and unknown resets', 'stale and unavailable', 'Cursor below one percent, no visible dollars, Included/Auto/API tooltip', 'refresh', 'Escape and focus return', 'outside close', 'no closed fetch', 'failed refresh retains rows', 'geometry and overflow', 'narrow trigger visible', 'keyboard scrolling at 960x480',
+    const report = { result: 'PASS', reads, wide: '1440x1000', narrow: '960x800', checks: ['portal', 'six plans', 'one boxed group per provider with logo, name and plan count', 'weekly-only Codex', 'known and unknown resets', 'stale and unavailable', 'Cursor below one percent, no visible dollars, Included/Auto/API tooltip', 'refresh', 'Escape and focus return', 'outside close', 'no closed fetch', 'failed refresh retains rows', 'geometry and overflow', 'narrow trigger visible', 'keyboard scrolling at 960x480',
       'heavy lifting: unset reads Balanced, clicks and arrow keys save to the relocated profile only, Right now follows the seats, labels unclipped at 960px'] };
     fs.writeFileSync(path.join(OUT, 'verdict.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report));
   } finally { win.destroy(); app.quit(); }
