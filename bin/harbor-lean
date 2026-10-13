@@ -44,6 +44,7 @@ function configuredProfiles() {
 // An optional local helper that applies a reset through the plan's own Codex
 // sign-in; named only on a machine that has it.
 const gptResetHelper = 'C:/tools/gpt-reset/gpt-reset.mjs';
+const cursorLoginHelper = 'C:/tools/cursor-worker/cursor-login.mjs';
 
 function resetText(seat) {
   if (seat.resetsAvailable === null) return 'resets unknown';
@@ -92,7 +93,9 @@ async function cursorUsage() {
   try {
     const plan = await createPlanUsageProvider({ profiles: configuredProfiles() }).getCursorPlan();
     const cursor = cursorFromPlans(plan ? [plan] : []);
-    return cursor ? { ...cursor, reason: plan.reason || null } : { label: 'Cursor', monthlyPct: null, reason: 'No Cursor plan found.' };
+    return cursor
+      ? { ...cursor, reason: plan.reason || null, signInNotice: plan.signInNotice || null }
+      : { label: 'Cursor', monthlyPct: null, reason: 'No Cursor plan found.' };
   } catch {
     return { label: 'Cursor', monthlyPct: null, reason: "Cursor's usage could not be read." };
   }
@@ -172,6 +175,15 @@ function routeText(route) {
   }
   const cursorPct = cursor.monthlyPct === null ? `unknown (${cursor.reason})` : (cursor.monthlyPct > 0 && cursor.monthlyPct < 1 ? '<1%' : `${Math.round(cursor.monthlyPct)}%`);
   console.log(`Cursor this month: ${cursorPct}`);
+  // Cursor's browser sign-in lapses every 60 days and never renews itself, and a
+  // lapsed one keeps all mechanical work on Claude (2026-10-11 to 10-13), so the
+  // last week before it ends, and after, says how to sign it back in.
+  if (cursor.signedOut || cursor.signInNotice) {
+    const how = fs.existsSync(cursorLoginHelper)
+      ? `node ${cursorLoginHelper} (it prints a link; open it in god Chrome and click Sign in)`
+      : 'cursor-agent login, run outside the Claude Code container';
+    console.log(`Cursor sign-in: ${cursor.signedOut ? 'signed out' : cursor.signInNotice.replace(/ Sign in again.*$/, '')}. Sign it back in with ${how}.`);
+  }
   console.log(`Verdict: ${verdict.summary}`);
   console.log('Routing right now:');
   for (const r of routes) {

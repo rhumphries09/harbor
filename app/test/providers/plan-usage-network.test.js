@@ -50,10 +50,11 @@ function fixture(t) {
     put(`${name}/auth.json`, { tokens: { access_token: token, account_id: accountId } });
     return { token, accountId };
   };
-  const cursor = (exp = NOW / 1000 + 3600) => {
+  const cursor = (exp = NOW / 1000 + 3600, { apiKey } = {}) => {
     const token = jwt({ email: 'token@example.com', exp });
     secrets.push(token);
-    put('AppData/Roaming/Cursor/auth.json', { accessToken: token });
+    if (apiKey) secrets.push(apiKey);
+    put('AppData/Roaming/Cursor/auth.json', { accessToken: token, refreshToken: token, ...(apiKey ? { apiKey } : {}) });
     return token;
   };
   const local = (name = '.codex', age = 60_000, pct = 28) => {
@@ -197,8 +198,47 @@ test('plan-usage-network skips expired access tokens for both providers without 
   assert.equal(plan(result).windows[0].usedPct, 28);
   assert.equal(plan(result).reason, 'Login token expired; it refreshes the next time codex runs.');
   assert.equal(plan(result).resetsReason, 'Login token expired; it refreshes the next time codex runs.');
-  assert.equal(plan(result, 'cursor').reason, 'Login token expired; it refreshes the next time cursor runs.');
+  // A browser sign-in (no API key) never renews itself, so Cursor reads as
+  // signed out with the day it ended, not as something the next run fixes.
+  const row = plan(result, 'cursor');
+  assert.equal(row.reason, 'Cursor is signed out: its sign-in expired on 2026-10-01 and does not renew itself. Sign in again with cursor-agent login.');
+  assert.equal(row.signedOut, true);
+  assert.equal(row.unavailable, true);
+  assert.equal(row.signInNotice, null);
   f.clean(result);
+});
+
+test('plan-usage-network: an expired Cursor sign-in with an API key still refreshes on its next run', async (t) => {
+  const f = fixture(t);
+  f.cursor(NOW / 1000 - 1, { apiKey: 'synthetic-cursor-api-key' });
+  const row = plan(await f.provider().getPlans(), 'cursor');
+  assert.equal(f.calls.length, 0);
+  assert.equal(row.reason, 'Login token expired; it refreshes the next time cursor runs.');
+  assert.equal(row.signedOut, false);
+  assert.equal(row.signInExpiresAt, null);
+});
+
+test('plan-usage-network warns in the last week of a Cursor browser sign-in, and only then', async (t) => {
+  for (const [days, warned] of [[8, false], [6.5, true]]) {
+    await t.test(`${days} days left`, async (subtest) => {
+      const f = fixture(subtest);
+      const exp = NOW / 1000 + days * 86_400;
+      f.cursor(exp);
+      f.dispatch((url) => {
+        assert.equal(url, CURSOR);
+        return response({ planUsage: { totalPercentUsed: 2 } });
+      });
+      const result = await f.provider({ usageProvider: { getUsage: async () => ({}) } }).getPlans();
+      const row = plan(result, 'cursor');
+      assert.equal(row.unavailable, false);
+      assert.equal(row.signedOut, false);
+      assert.equal(row.signInExpiresAt, exp);
+      assert.equal(row.signInNotice, warned
+        ? `Cursor's sign-in ends on ${new Date(exp * 1000).toISOString().slice(0, 10)} and does not renew itself. Sign in again before then with cursor-agent login.`
+        : null);
+      f.clean(result);
+    });
+  }
 });
 
 test('plan-usage-network both kill switches disable every authenticated read', async (t) => {

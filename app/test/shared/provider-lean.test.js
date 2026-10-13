@@ -100,6 +100,10 @@ test('mechanical work goes to Cursor while its month has room, under every setti
   assert.equal(unread.side, 'claude');
   assert.match(unread.reason, /^Cursor's usage could not be read. Heavy lifting leans Claude.$/);
   assert.equal(leanRoute('lean-claude', 'mechanical', TODAY, { cursor: { label: 'Cursor', monthlyPct: null } }).side, 'claude');
+  // A lapsed sign-in says so, with the fix, instead of "could not be read".
+  const signedOut = leanRoute('balanced', 'mechanical', TODAY, { cursor: { label: 'Cursor', monthlyPct: null, signedOut: true } });
+  assert.equal(signedOut.side, 'claude');
+  assert.match(signedOut.reason, /^Cursor is signed out; sign it in again with cursor-agent login. /);
   // Cursor never takes image work or general work on its own.
   assert.equal(leanRoute('lean-openai', 'general', TODAY, { cursor: CURSOR }).side, 'gpt');
   assert.equal(leanRoute('lean-claude', 'image', TODAY, { cursor: CURSOR }).side, 'gpt');
@@ -152,8 +156,9 @@ test('the Right now rows for each setting', () => {
 });
 
 test('Cursor comes from the same plan-usage payload, monthly window only', () => {
-  assert.deepEqual(cursorFromPlans([{ provider: 'cursor', label: 'Cursor', windows: [{ kind: 'monthly', usedPct: 3 }] }]), { label: 'Cursor', monthlyPct: 3 });
-  assert.deepEqual(cursorFromPlans([{ provider: 'cursor', label: 'Cursor', unavailable: true, windows: [] }]), { label: 'Cursor', monthlyPct: null });
+  assert.deepEqual(cursorFromPlans([{ provider: 'cursor', label: 'Cursor', windows: [{ kind: 'monthly', usedPct: 3 }] }]), { label: 'Cursor', monthlyPct: 3, signedOut: false });
+  assert.deepEqual(cursorFromPlans([{ provider: 'cursor', label: 'Cursor', unavailable: true, windows: [] }]), { label: 'Cursor', monthlyPct: null, signedOut: false });
+  assert.deepEqual(cursorFromPlans([{ provider: 'cursor', label: 'Cursor', unavailable: true, signedOut: true, windows: [] }]), { label: 'Cursor', monthlyPct: null, signedOut: true });
   assert.equal(cursorFromPlans([{ provider: 'codex', label: 'Default', windows: [] }]), null);
   assert.equal(cursorFromPlans(undefined), null);
 });

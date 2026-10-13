@@ -206,7 +206,10 @@ export function PlanUsageButton() {
                     </span>
                   </div>
                   {account ? <div className="plan-usage-account" title={account}>{account}</div> : null}
-                  {plan.unavailable ? <div className="plan-usage-unavailable" title={plan.reason}>Usage unavailable</div> : null}
+                  {/* The reason, not a bare "Usage unavailable": an expired Cursor
+                      sign-in sat behind a tooltip for two days (2026-10-13). */}
+                  {plan.unavailable ? <div className={`plan-usage-unavailable${plan.signedOut ? ' is-warning' : ''}`}>{plan.signedOut ? plan.reason : `Usage unavailable${plan.reason ? `: ${plan.reason}` : ''}`}</div> : null}
+                  {!plan.unavailable && plan.signInNotice ? <div className="plan-usage-unavailable is-warning">{plan.signInNotice}</div> : null}
                   {plan.windows.map((w, i) => {
                     const f = formatWindow(w, nowMs);
                     return <div className="plan-usage-window" key={`${w.kind}-${i}`} title={f.tooltip}>

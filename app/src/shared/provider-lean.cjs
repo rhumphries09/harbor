@@ -161,7 +161,8 @@ function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex 
     // ordinary general work again.
     const fallback = leanRoute(id, 'general', seats, { large });
     let why = "Cursor's usage could not be read.";
-    if (complex) why = 'Too complex for Cursor: the changes need judgement or a hard-to-check result.';
+    if (cursor?.signedOut) why = 'Cursor is signed out; sign it in again with cursor-agent login.';
+    if (complex) why ='Too complex for Cursor: the changes need judgement or a hard-to-check result.';
     else if (cursor && finitePct(cursor.monthlyPct)) why = `Cursor is at least ${CURSOR_MAX_PCT}% used this month.`;
     return { ...fallback, kind: kind.id, reason: `${why} ${fallback.reason}` };
   }
@@ -257,7 +258,11 @@ function cursorFromPlans(plans) {
   const plan = (Array.isArray(plans) ? plans : []).find((p) => p && p.provider === 'cursor');
   if (!plan) return null;
   const monthly = (plan.windows || []).find((w) => w && w.kind === 'monthly');
-  return { label: plan.label || 'Cursor', monthlyPct: plan.unavailable || !monthly ? null : monthly.usedPct };
+  return {
+    label: plan.label || 'Cursor',
+    monthlyPct: plan.unavailable || !monthly ? null : monthly.usedPct,
+    signedOut: Boolean(plan.signedOut),
+  };
 }
 
 module.exports = {

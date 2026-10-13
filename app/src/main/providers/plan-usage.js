@@ -11,6 +11,7 @@ const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const CODEX_RESETS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits';
 const CURSOR_USAGE_URL = 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage';
 const TAIL_BYTES = 512 * 1024;
+const CURSOR_SIGN_IN_WARN_DAYS = 7;
 const finite = (n) => typeof n === 'number' && Number.isFinite(n);
 const stamp = (s) => Date.parse(s) || 0;
 const hash = (s) => createHash('sha256').update(s).digest('hex');
@@ -366,6 +367,15 @@ function createPlanUsageProvider({
     const auth = await readJson(file);
     const token = auth?.accessToken;
     const claims = jwtClaims(token);
+    // A browser sign-in never renews itself: cursor-agent refreshes its token
+    // only when an API key is stored beside it, and the access and refresh
+    // tokens of a browser login share one expiry (60 days). So "it refreshes the
+    // next time cursor runs" is false for it, and an expired one silently kept
+    // every mechanical job off Cursor from 2026-10-11 until Pat noticed (2026-10-13).
+    const login = offline ? { expiresAt: null, signedOut: null, notice: null } : cursorLogin(auth, claims);
+    if (login.signedOut) {
+      return cursorShape({ email: typeof claims.email === 'string' ? claims.email : null, login, reason: login.signedOut });
+    }
     const result = await remote(`cursor:${file}`, CURSOR_USAGE_URL, token, null, (body, time) => {
       const window = cursorWindow(body);
       if (!window) return null;
@@ -377,6 +387,32 @@ function createPlanUsageProvider({
     });
     const sample = result.value;
     const email = sample?.email || (typeof claims.email === 'string' ? claims.email : null);
+    return cursorShape({ email, sample, login, reason: result.reason });
+  }
+
+  // When the browser sign-in ends, and the notice Pat sees for the last week
+  // before it does. An API-key sign-in renews itself, so it has neither.
+  function cursorLogin(auth, claims) {
+    const exp = finite(claims.exp) ? claims.exp : null;
+    if (!auth?.accessToken || exp === null || (typeof auth.apiKey === 'string' && auth.apiKey)) {
+      return { expiresAt: null, signedOut: null, notice: null };
+    }
+    const day = new Date(exp * 1000).toISOString().slice(0, 10);
+    if (exp * 1000 <= now()) {
+      return {
+        expiresAt: exp,
+        signedOut: `Cursor is signed out: its sign-in expired on ${day} and does not renew itself. Sign in again with cursor-agent login.`,
+        notice: null,
+      };
+    }
+    const daysLeft = (exp * 1000 - now()) / 86_400_000;
+    const notice = daysLeft <= CURSOR_SIGN_IN_WARN_DAYS
+      ? `Cursor's sign-in ends on ${day} and does not renew itself. Sign in again before then with cursor-agent login.`
+      : null;
+    return { expiresAt: exp, signedOut: null, notice };
+  }
+
+  function cursorShape({ email, sample = null, login, reason }) {
     return {
       provider: 'cursor',
       id: 'cursor:default',
@@ -388,7 +424,10 @@ function createPlanUsageProvider({
       source: sample ? 'endpoint' : null,
       updatedAt: sample?.updatedAt || null,
       unavailable: !sample,
-      reason: result.reason,
+      reason,
+      signedOut: Boolean(login.signedOut),
+      signInExpiresAt: login.expiresAt,
+      signInNotice: login.notice,
     };
   }
   async function collect() {

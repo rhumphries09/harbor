@@ -4348,6 +4348,7 @@ button { font-family: inherit; }
 /* Match the rail reset badge's font and ordinary digit spacing. */
 .plan-usage-reset { text-align: right; color: var(--sub); font: 500 10px var(--font-mono); }
 .plan-usage-resets, .plan-usage-unavailable { color: var(--sub); margin-top: 6px; font-size: 11px; }
+.plan-usage-unavailable.is-warning { color: var(--warn); }
 .plan-usage-footer { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; border-top: 1px solid var(--ln2); padding: 7px 8px 2px; color: var(--slate); font-size: 10px; }
 .plan-usage-message { padding: 4px 8px; color: var(--sub); }
 /* Heavy lifting: four equal segments, the whiteboard's segmented-control look. */
