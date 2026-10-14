@@ -389,14 +389,31 @@ const enterFixture = (name) => fs.readFileSync(
 // Claude's composer as 2.1.280 draws it (the fixtures above): the draft sits in
 // a box between two dividers, the prompt glyph followed by a no-break space. An
 // Enter either submits the draft (the box empties) or is swallowed.
-function composerPane(h, { swallowEnters = 0, renderDelayReads = 0 } = {}) {
-  let draft = '';
+//
+// `pathChips` draws a pasted image path the way CLI 2.1.299 does (its paste
+// handler, read from the binary 2026-10-14): the paste is split at every
+// newline and at every space that starts a path, each segment that names an
+// image file becomes an [Image #N] chip, and the chips come first, followed by
+// the other segments joined with newlines. `initialDraft` is text an earlier
+// attempt left in the prompt.
+const PASTE_SEGMENT_SPLIT = / (?=\/|[A-Za-z]:\\)/;
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp)$/i;
+function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = false, initialDraft = '', imagesBefore = 0 } = {}) {
+  let draft = initialDraft;
   let swallowed = 0;
-  let images = 0;
+  let images = imagesBefore;
   let hideReads = 0;
   const echoed = [];
   const divider = '─'.repeat(60);
   h.prompt.echo = false; // this stand-in draws its own prompt
+  const drawPaste = (text) => {
+    if (!pathChips) return text;
+    const segments = text.split(PASTE_SEGMENT_SPLIT).flatMap((s) => s.split('\n')).filter((s) => s.trim());
+    const paths = segments.filter((s) => IMAGE_FILE.test(s.trim()));
+    if (!paths.length) return text;
+    const chips = paths.map(() => { images += 1; return `[Image #${images}]`; }).join('');
+    return `${chips}${segments.filter((s) => !IMAGE_FILE.test(s.trim())).join('\n  ')}`;
+  };
   // A submitted prompt is echoed above the box, as Claude draws it; a busy CLI
   // shows nothing new for `renderDelayReads` reads after each keystroke.
   h.deps.readPane = async () => {
@@ -414,13 +431,16 @@ function composerPane(h, { swallowEnters = 0, renderDelayReads = 0 } = {}) {
     } else if (text === IMAGE_PASTE) {
       images += 1;
       draft += `[Image #${images}] `;
+    } else if (text.startsWith('\x1b[200~')) {
+      draft += drawPaste(text.replace(/\x1b\[20[01]~/g, ''));
+      hideReads = renderDelayReads;
     } else {
-      draft += text.replace(/\x1b\[20[01]~/g, '');
+      draft += text;
       hideReads = renderDelayReads;
     }
     return result;
   };
-  return { get draft() { return draft; } };
+  return { get draft() { return draft; }, get echoed() { return echoed; } };
 }
 
 const typed = (h) => h.sent.map(({ text }) => text);
@@ -555,6 +575,61 @@ test('composerSendState reads the 2.1.295 prompt shapes it used to miss', () => 
   assert.equal(composerSendState(enterFixture('shell-mode-prompt-2.1.295.txt'), { text: '!echo something else' }), 'pending');
 });
 
+// 2026-10-14, Pat from the phone: "FYI" with a screenshot sat on "sending" for
+// three minutes and was refused, and the next session's first message ("What's
+// the deal? Fix please", also with a screenshot) was refused while Claude
+// actually submitted it. The phone server has no clipboard, so it types the
+// upload's path on an "Image:" line above the message, and CLI 2.1.299 turns a
+// pasted image path into an [Image #N] chip. The prompt showed the message, as
+// the fixture below (the real screen with the session's prose replaced), and
+// the check compared it against a path that was no longer there.
+const PHONE_SHOT = 'C:\\Users\\me\\AppData\\Roaming\\harbor\\server-upload\\run-1\\387201e8.png';
+
+test('composerSendState reads a pasted image path that Claude drew as an image chip', () => {
+  const chipped = enterFixture('image-path-chip-2.1.299.txt');
+  assert.equal(composerSendState(chipped, { text: `Image: ${PHONE_SHOT}\nFYI`, pasted: true }), 'holds');
+  assert.equal(composerSendState(chipped, { text: `Image: ${PHONE_SHOT}\nFYA`, pasted: true }), 'pending');
+  // The path left the text only because an image went in; no chip, no match.
+  const unchipped = `${PROMPT_RULE}\n❯ Image:\n  FYI\n${PROMPT_RULE}\n  personal  ·  Opus 5.5`;
+  assert.equal(composerSendState(unchipped, { text: `Image: ${PHONE_SHOT}\nFYI`, pasted: true }), 'pending');
+  // A CLI that leaves the path as text still matches the way it always did.
+  const literal = `${PROMPT_RULE}\n❯ Image: ${PHONE_SHOT}\n  FYI\n${PROMPT_RULE}\n  personal  ·  Opus 5.5`;
+  assert.equal(composerSendState(literal, { text: `Image: ${PHONE_SHOT}\nFYI`, pasted: true }), 'holds');
+  // Submitted: Claude echoes the chip and the text above an empty box.
+  const submitted = `❯ [Image #13]Image:\n  FYI\n  ⎿  [Image #13]\n${PROMPT_EMPTY}`;
+  assert.equal(composerSendState(submitted, { text: `Image: ${PHONE_SHOT}\nFYI`, pasted: true }), 'taken');
+});
+
+test('a short phone message with an image is sent when Claude draws the path as an image chip', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  delete h.deps.setXClipboardImage;
+  const pane = composerPane(h, { pathChips: true, imagesBefore: 12 });
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+
+  await send.send({ sessionId: 's-phone-fyi', text: 'FYI', images: [PHONE_SHOT], pane: target });
+  await send.send({ sessionId: 's-phone-fyi', text: 'What\u2019s the deal? Fix please', images: [PHONE_SHOT], pane: target });
+
+  assert.deepEqual(typed(h), [
+    `\x1b[200~Image: ${PHONE_SHOT}\nFYI\x1b[201~`, '\r',
+    `\x1b[200~Image: ${PHONE_SHOT}\nWhat\u2019s the deal? Fix please\x1b[201~`, '\r',
+  ], 'each typed once, each submitted with one Enter');
+  assert.equal(pane.draft, '');
+  assert.deepEqual(pane.echoed, ['[Image #13]Image:\n  FYI', '[Image #14]Image:\n  What\u2019s the deal? Fix please']);
+});
+
+test('a phone image message already in the prompt as a chip is submitted, not typed again', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  delete h.deps.setXClipboardImage;
+  const pane = composerPane(h, { pathChips: true, initialDraft: '[Image #13]Image:\n  FYI', imagesBefore: 13 });
+  const send = createSessionSend(h.deps);
+
+  await send.send({ sessionId: 's-phone-again', text: 'FYI', images: [PHONE_SHOT], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+
+  assert.deepEqual(typed(h), ['\r'], 'nothing typed on top of it');
+  assert.deepEqual(pane.echoed, ['[Image #13]Image:\n  FYI']);
+});
+
 test('the sessions view is recognized by its own box and key hints, never by prose that quotes it', () => {
   assert.equal(isFleetView(enterFixture('sessions-view-2.1.295.txt')), true);
   assert.equal(isFleetView(enterFixture('sessions-view-typed-2.1.295.txt')), true);
@@ -655,6 +730,37 @@ test('a pane that has taken a message keeps the short wait', async () => {
     (error) => error.code === 'PROMPT_NEVER_HELD',
   );
   assert.ok(reads < 120, `an established pane gives up in seconds, not minutes (${reads} reads)`);
+});
+
+// 2026-10-14: the phone server had never typed into a cdt-app pane that had run
+// for 12 hours, so it called that pane "still starting up" and gave a refused
+// send the three-minute wait. The daemon's spawn time decides instead.
+test('a pane the daemon started long ago is not treated as starting, even by a Harbor that never typed into it', async () => {
+  const longAgo = new Date(Date.now() - 12 * 60 * 60_000).toISOString();
+  const justNow = new Date().toISOString();
+  for (const [createdAt, starting] of [[longAgo, false], [justNow, true]]) {
+    const h = makeHarness({
+      panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', created_at: createdAt }],
+      controlled: 'pane-1',
+      promptEchoes: false,
+    });
+    let reads = 0;
+    h.deps.readPane = async () => { reads += 1; return `conversation\n${PROMPT_EMPTY}`; };
+    const send = createSessionSend(h.deps);
+    const details = [];
+    send.emitter.on('status', (s) => { if (s.phase === 'sending' && s.detail) details.push(s.detail); });
+    await assert.rejects(
+      send.send({ sessionId: 's-old-pane', text: 'never shown in this prompt', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+      (error) => error.code === 'PROMPT_NEVER_HELD',
+    );
+    if (starting) {
+      assert.ok(reads > 1000, `a pane spawned just now keeps the startup wait (${reads} reads)`);
+      assert.match(details[0] || '', /still starting up/);
+    } else {
+      assert.ok(reads < 120, `a pane spawned 12 hours ago gives up in seconds (${reads} reads)`);
+      assert.deepEqual(details, [], 'and never says Claude is starting up');
+    }
+  }
 });
 
 test('a second send after a refusal waits for the first typing instead of typing the message again', async () => {

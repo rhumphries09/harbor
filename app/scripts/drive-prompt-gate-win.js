@@ -24,6 +24,12 @@
 //   transcript exactly once through the new check.
 //   a prompt that never takes the text: no Enter may reach the pane, the send
 //   must fail with the honest error, and nothing may reach the transcript.
+//   a short phone message with an image (2026-10-14): harbor-server has no
+//   clipboard, so it types the upload's path on an "Image:" line, and the CLI
+//   (2.1.299) draws that path as an [Image #N] chip. "FYI" plus a screenshot
+//   was refused after three minutes because the check still wanted the path.
+//   It must land once, with the image attached. Last, because the pre-fix code
+//   leaves it sitting in the prompt.
 //
 // Usage (from app/, Windows):
 //   ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe scripts/drive-prompt-gate-win.js
@@ -36,6 +42,7 @@ const { execPath: guiNodeExec } = require('../test/support/gui-node.js');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { SessionClient } = require('../src/daemon/client.js');
@@ -53,7 +60,45 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const tmp = fs.realpathSync.native(os.tmpdir());
 const store = fs.mkdtempSync(path.join(tmp, 'harbor-prompt-gate-proof-'));
 const cwd = fs.mkdtempSync(path.join(tmp, 'harbor-prompt-gate-cwd-'));
+// Outside the session's folder, like the phone server's upload directory.
+const uploads = fs.mkdtempSync(path.join(tmp, 'harbor-prompt-gate-upload-'));
 const socketPath = path.join(store, 'daemon.sock');
+
+// A 16x16 grey PNG, so the phone scenario has a real image file to attach.
+function writeTinyPng(file) {
+  const table = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (buffer) => {
+    let c = 0xffffffff;
+    for (const byte of buffer) c = table[(c ^ byte) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const sum = Buffer.alloc(4);
+    sum.writeUInt32BE(crc(body));
+    return Buffer.concat([length, body, sum]);
+  };
+  const size = 16;
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(size, 0);
+  header.writeUInt32BE(size, 4);
+  header[8] = 8; // bits per channel
+  header[9] = 2; // RGB
+  const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(size * 3, 0x80)]);
+  const pixels = zlib.deflateSync(Buffer.concat(Array.from({ length: size }, () => row)));
+  fs.writeFileSync(file, Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', header), chunk('IDAT', pixels), chunk('IEND', Buffer.alloc(0)),
+  ]));
+  return file;
+}
+const PHONE_IMAGE = writeTinyPng(path.join(uploads, 'phone-shot.png'));
 const sendLogFile = path.join(store, 'send-log.jsonl');
 
 const words = 'the quick brown fox jumps over the lazy dog ';
@@ -64,6 +109,8 @@ const SCENARIOS = [
   { name: 'a 1,600-character single line', text: (m) => `Reply with just OK. ${words.repeat(36)}${m}` },
   { name: 'a pasted multi-line body', text: (m) => `Reply with just OK.\n\nThis body is pasted, like a message with paragraphs. ${m}` },
   { name: 'a prompt that never takes the text', text: (m) => `Reply with just OK. ${m}`, dropText: true },
+  // Shorter than the 24 characters the check compares, as "FYI" was.
+  { name: 'a short phone message with an image (its path typed, no clipboard)', text: (m) => `FYI ${m}`, phoneImage: true },
 ];
 
 const cleanup = { client: null, daemon: null, paneId: null, transcriptDir: null, sessionId: null };
@@ -76,7 +123,7 @@ async function teardown() {
     await Promise.race([new Promise((resolve) => daemon.once('exit', resolve)), sleep(5000)]);
   }
   await sleep(500);
-  for (const dir of [store, cwd, transcriptDir].filter(Boolean)) {
+  for (const dir of [store, cwd, uploads, transcriptDir].filter(Boolean)) {
     try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }); } catch { /* best effort */ }
   }
   if (sessionId) {
@@ -150,7 +197,7 @@ async function main() {
   let dropText = false;
   let delayTextMs = 0;
   const written = [];
-  const send = createSessionSend({
+  const deps = {
     snapshot: async () => ({ panes: [{ pane_id: paneId, workspace_id: 'ws' }], workspaces: [{ workspace_id: 'ws', label: 'proof' }] }),
     readPane: async (_id, lines = 16, source) => readScreen(lines, source),
     // Production reads Claude's dim suggested prompt from the keeper's cells.
@@ -182,10 +229,14 @@ async function main() {
     setXClipboardImage: async () => {},
     captureDir: path.join(store, 'unrecognized-dialogs'),
     sendLogFile,
-  });
+  };
+  const desktop = createSessionSend(deps);
+  // The phone server: its own process, and no clipboard to paste an image from.
+  const phone = createSessionSend({ ...deps, setXClipboardImage: undefined });
 
   const failures = [];
   for (const scenario of SCENARIOS) {
+    const send = scenario.phoneImage ? phone : desktop;
     const marker = `gate-proof-${randomUUID().slice(0, 8)}`;
     const errors = [];
     const onStatus = (status) => { if (status.phase === 'error') errors.push(status.detail); };
@@ -195,7 +246,12 @@ async function main() {
     delayTextMs = scenario.delayTextMs || 0;
     let thrown = null;
     try {
-      await send.send({ sessionId: claudeSession, text: scenario.text(marker), pane: { paneId, workspaceId: 'ws' } });
+      await send.send({
+        sessionId: claudeSession,
+        text: scenario.text(marker),
+        images: scenario.phoneImage ? [PHONE_IMAGE] : [],
+        pane: { paneId, workspaceId: 'ws' },
+      });
     } catch (error) { thrown = error; }
     dropText = false;
     delayTextMs = 0;
@@ -236,6 +292,17 @@ async function main() {
     } else {
       if (thrown || errors.length) failures.push(`${scenario.name}: ${thrown ? thrown.message : errors[0]}`);
       if (landed !== 1) failures.push(`${scenario.name}: ${landed} copies landed, expected exactly 1`);
+    }
+    if (scenario.phoneImage && landed) {
+      const record = fs.readFileSync(transcript, 'utf8').split('\n')
+        .filter((line) => line.includes(marker))
+        .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+        .find((entry) => entry?.type === 'user' && !entry.isMeta);
+      const content = Array.isArray(record?.message?.content) ? record.message.content : [];
+      const text = content.filter((block) => block.type === 'text').map((block) => block.text).join(' ');
+      const attached = content.some((block) => block.type === 'image');
+      console.log(`  Claude received: ${JSON.stringify(text.slice(0, 80))}, image attached: ${attached}`);
+      if (!attached && !text.includes(PHONE_IMAGE)) failures.push(`${scenario.name}: the image reached Claude neither attached nor as a path`);
     }
   }
 

@@ -218,6 +218,37 @@ const PASTE_COLLAPSE_CHARS = 700;
 const mayCollapseToPlaceholder = (text) => /\n/.test(String(text || '')) || String(text || '').length >= PASTE_COLLAPSE_CHARS;
 const PROMPT_GLYPH_RE = /^\s*[❯!]/;
 const squashSpace = (value) => String(value || '').replace(/\s+/g, '');
+
+// CLAUDE DRAWS A PASTED IMAGE PATH AS AN IMAGE CHIP (2026-10-14, Pat from the
+// phone: "FYI" with a screenshot refused after three minutes, and the next
+// session's "What's the deal? Fix please" with a screenshot refused while
+// Claude had in fact submitted it). harbor-server has no clipboard, so a phone
+// image goes in as its upload's path on an "Image:" line above the message,
+// pasted because of that newline. CLI 2.1.299's paste handler, read from the
+// binary: split the paste at every newline and at every space that starts a
+// path, attach each segment naming a .png/.jpg/.jpeg/.gif/.webp file as an
+// image, then insert one [Image #N] chip per image FOLLOWED BY the remaining
+// segments joined with newlines. The prompt showed "[Image #13]Image:" over
+// "FYI"; the check wanted the 24-character tail of "Image: <path>\nFYI", which
+// ends in the path, so it could never match a message shorter than that. When
+// no image could be read the CLI inserts the paste unchanged, so both forms
+// count. Returns the (whitespace-free) text that follows the chips and how many
+// images the paste names, or null for a send with no image path in it.
+const IMAGE_PATH_RE = /\.(png|jpe?g|gif|webp)$/i;
+const IMAGE_CHIPS_RE = /\[Image#\d+\]/g;
+const countImageChips = (inside) => (inside.match(IMAGE_CHIPS_RE) || []).length;
+const unquote = (value) => ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))
+  ? value.slice(1, -1)
+  : value);
+const isImagePathSegment = (segment) => IMAGE_PATH_RE.test(unquote(segment.trim()));
+function textAfterImageChips(text) {
+  const segments = String(text || '').split(/ (?=\/|[A-Za-z]:\\)/)
+    .flatMap((segment) => segment.split('\n'))
+    .filter((segment) => segment.trim());
+  const imageCount = segments.filter(isImagePathSegment).length;
+  if (!imageCount) return null;
+  return { rest: squashSpace(segments.filter((segment) => !isImagePathSegment(segment)).join('\n')), imageCount };
+}
 function composerBox(screen) {
   const lines = String(screen || '').split('\n');
   let bottom = -1;
@@ -242,9 +273,16 @@ function composerSendState(screen, { text = '', pasted = false, imageMarker = nu
   const shown = found.shell ? squashSpace(text).replace(/^!/, '') : squashSpace(text);
   const tail = shown.slice(-SEND_TAIL_CHARS);
   const marker = squashSpace(imageMarker);
+  // The same send with its image paths drawn as chips (textAfterImageChips),
+  // which only counts while the box actually shows a chip.
+  const chipped = found.shell ? null : textAfterImageChips(text);
+  const chipTail = chipped ? chipped.rest.slice(-SEND_TAIL_CHARS) : '';
   if (tail ? inside.endsWith(tail) : Boolean(marker && inside.endsWith(marker))) return 'holds';
+  if (chipped && countImageChips(inside) > 0
+    && (chipTail ? inside.endsWith(chipTail) : /\[Image#\d+\]$/.test(inside))) return 'holds';
   if (pasted && new RegExp(`${PASTE_PLACEHOLDER_RE.source}$`).test(inside)) return 'holds';
   if (tail ? above.includes(tail) : Boolean(marker && above.includes(marker))) return 'taken';
+  if (chipTail && above.includes(chipTail)) return 'taken';
   if (pasted && PASTE_PLACEHOLDER_RE.test(above)) return 'taken';
   return 'pending';
 }
@@ -514,6 +552,25 @@ function createSessionSend(deps) {
   // swallowed; a pane that has taken a message before is by definition past
   // that. See deliver().
   const deliveredPanes = new Set();
+
+  // That set is per PROCESS, so it starts empty whenever this Harbor does, and
+  // harbor-server restarts on its own schedule. On 2026-10-14 the phone server
+  // treated a cdt-app pane that had run for 12 hours as "still starting up":
+  // the status line said so, and a refused send took the three-minute startup
+  // wait instead of seconds. The daemon records when it spawned each pane;
+  // one older than this is past startup whoever typed into it before. A pane
+  // with no recorded start keeps the long wait.
+  const PANE_STARTUP_MS = 5 * 60_000;
+  const paneIsPastStartup = async (paneId) => {
+    try {
+      const snap = await snapshot();
+      const pane = (snap?.panes || []).find((candidate) => candidate.pane_id === paneId);
+      const started = Date.parse(pane?.created_at || '');
+      return Number.isFinite(started) && clock() - started > PANE_STARTUP_MS;
+    } catch {
+      return false;
+    }
+  };
 
   // `blankTimeoutMs` (2026-09-26): a pane that has drawn NOTHING yet is still
   // starting, not busy, so it may wait longer than a drawn pane that never
@@ -1051,7 +1108,11 @@ function createSessionSend(deps) {
   const promptHoldsExactly = (screen, text) => {
     const found = composerBox(screen);
     if (!found || !text || isFleetView(screen)) return false;
-    return found.inside === (found.shell ? squashSpace(text).replace(/^!/, '') : squashSpace(text));
+    if (found.inside === (found.shell ? squashSpace(text).replace(/^!/, '') : squashSpace(text))) return true;
+    // Or exactly this send with its image paths drawn as chips, one per path.
+    const chipped = found.shell ? null : textAfterImageChips(text);
+    return Boolean(chipped) && countImageChips(found.inside) === chipped.imageCount
+      && found.inside.replace(IMAGE_CHIPS_RE, '') === chipped.rest;
   };
 
   // No default. A silent `= 'claude'` here is what let a codex pane be driven
@@ -1215,8 +1276,9 @@ function createSessionSend(deps) {
       }
       if (gated) {
         // A pane that has never taken a message from this Harbor may still be
-        // starting, and so may one still owing an earlier attempt's typing.
-        const startup = awaitEarlier || !deliveredPanes.has(paneId);
+        // starting, unless the daemon says it has run for a while, and so may
+        // one still owing an earlier attempt's typing.
+        const startup = awaitEarlier || (!deliveredPanes.has(paneId) && !(await paneIsPastStartup(paneId)));
         const held = await waitForPromptToHold(paneId, awaitEarlier ? earlier.sent : sent, {
           polls: startup ? PROMPT_HOLD_STARTUP_POLLS : PROMPT_HOLD_POLLS,
           onWait: startup && onWait ? () => onWait(awaitEarlier ? EARLIER_WAIT_NOTICE : STARTUP_WAIT_NOTICE) : null,

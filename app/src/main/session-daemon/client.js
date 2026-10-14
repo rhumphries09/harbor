@@ -86,6 +86,9 @@ function paneFor(session) {
       : null,
     exited: Boolean(session.exit),
     focused: false,
+    // When the daemon spawned it. session-send reads this to tell a pane that
+    // is still starting from one that has run for hours.
+    created_at: session.created_at ?? null,
   };
 }
 
