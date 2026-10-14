@@ -4,12 +4,16 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
+const { cursorAuthFile } = require('../../shared/cursor-auth.cjs');
 
 const STALE_MS = 180_000;
 const COOLDOWN_MS = 60_000;
 const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const CODEX_RESETS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits';
 const CURSOR_USAGE_URL = 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage';
+const CURSOR_EXCHANGE_URL = 'https://api2.cursor.sh/auth/exchange_user_api_key';
+// cursor-agent's own margin: a token with under five minutes left is renewed.
+const CURSOR_TOKEN_MARGIN_MS = 300_000;
 const TAIL_BYTES = 512 * 1024;
 const CURSOR_SIGN_IN_WARN_DAYS = 7;
 const finite = (n) => typeof n === 'number' && Number.isFinite(n);
@@ -191,11 +195,6 @@ function cursorWindow(body) {
   };
 }
 
-function cursorAuthFile(home, env, platform) {
-  if (platform === 'win32') return path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Cursor', 'auth.json');
-  if (platform === 'darwin') return path.join(home, '.cursor', 'auth.json');
-  return path.join(env.XDG_CONFIG_HOME || path.join(home, '.config'), 'cursor', 'auth.json');
-}
 
 // Cache the promise before starting work so overlapping callers share the
 // pending read as well as its answer. No caller can observe an empty result.
@@ -291,11 +290,81 @@ function createPlanUsageProvider({
     }
   }
 
-  async function remote(key, url, token, accountId, normalize) {
+  // `identitySeed` names the account when the token alone does not: a Cursor
+  // API-key sign-in mints a new hour-long token on every exchange, and each new
+  // token would otherwise read as "sign-in changed" inside the cooldown.
+  async function remote(key, url, token, accountId, normalize, identitySeed) {
     const reason = tokenReason(token, url === CURSOR_USAGE_URL ? 'cursor' : 'codex');
     if (reason) return { value: null, reason };
-    const identity = hash(`${token}\0${accountId || ''}`);
+    const identity = hash(identitySeed || `${token}\0${accountId || ''}`);
     return cachedRequest(key, identity, () => request(url, token, accountId, normalize));
+  }
+
+  // A Cursor User API key (Pat's choice, 2026-10-13) is traded for a token at
+  // Cursor's own fixed route, exactly as cursor-agent does. Those tokens last ONE
+  // hour and cursor-agent renews its stored copy only while it runs, so between
+  // runs the stored token is usually expired; reading that as "usage unknown"
+  // would send every mechanical job to Claude, so nothing would run Cursor, so
+  // nothing would renew it. The traded token stays in memory: a reader inside the
+  // Claude Code container (bin/harbor-lean) that wrote auth.json would fork it.
+  let traded = null;
+  function cursorKeyToken(apiKey) {
+    const keyHash = hash(`cursor-api-key\0${apiKey}`);
+    if (traded?.keyHash === keyHash && (traded.pending || traded.exp * 1000 - now() > CURSOR_TOKEN_MARGIN_MS)) {
+      return traded.pending || Promise.resolve({ token: traded.token, reason: null });
+    }
+    const pending = exchangeCursorKey(apiKey).then((result) => {
+      traded = result.token ? { keyHash, token: result.token, exp: result.exp } : null;
+      return result;
+    });
+    traded = { keyHash, pending };
+    return pending;
+  }
+
+  async function exchangeCursorKey(apiKey) {
+    const controller = new AbortController();
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimer(() => {
+        controller.abort();
+        resolve({ token: null, reason: 'Cursor API key exchange timed out after 10 seconds.' });
+      }, 10_000);
+    });
+    const operation = (async () => {
+      try {
+        const response = await fetchImpl(CURSOR_EXCHANGE_URL, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+          body: '{}',
+          signal: controller.signal,
+          redirect: 'error',
+        });
+        if (response.status === 401 || response.status === 403) {
+          return {
+            token: null,
+            refused: true,
+            reason: `Cursor refused its stored API key (HTTP ${response.status}); it may have been revoked. Make a new one at cursor.com/dashboard/api and sign in with it.`,
+          };
+        }
+        if (!response.ok) {
+          const status = Number.isInteger(response.status) ? ` (HTTP ${response.status})` : '';
+          return { token: null, reason: `Cursor API key exchange failed${status}.` };
+        }
+        const body = await response.json();
+        const token = typeof body?.accessToken === 'string' && body.accessToken ? body.accessToken : null;
+        if (!token) return { token: null, reason: 'Cursor API key exchange returned no token.' };
+        const exp = jwtClaims(token).exp;
+        return { token, exp: finite(exp) ? exp : now() / 1000 + 3600, reason: null };
+      } catch {
+        // Response text and exception messages can contain credentials.
+        return { token: null, reason: 'Cursor API key exchange could not be completed.' };
+      }
+    })();
+    try {
+      return await Promise.race([deadline, operation]);
+    } finally {
+      clearTimer(timer);
+    }
   }
 
   function endpointSample(body, time) {
@@ -365,7 +434,7 @@ function createPlanUsageProvider({
   async function cursorPlan() {
     const file = cursorAuthFile(home, env, platform);
     const auth = await readJson(file);
-    const token = auth?.accessToken;
+    let token = auth?.accessToken;
     const claims = jwtClaims(token);
     // A browser sign-in never renews itself: cursor-agent refreshes its token
     // only when an API key is stored beside it, and the access and refresh
@@ -376,6 +445,19 @@ function createPlanUsageProvider({
     if (login.signedOut) {
       return cursorShape({ email: typeof claims.email === 'string' ? claims.email : null, login, reason: login.signedOut });
     }
+    const apiKey = typeof auth?.apiKey === 'string' && auth.apiKey ? auth.apiKey : null;
+    if (apiKey && !offline) {
+      const exp = jwtClaims(token).exp;
+      if (typeof token !== 'string' || !token || !finite(exp) || exp * 1000 - now() < CURSOR_TOKEN_MARGIN_MS) {
+        const fresh = await cursorKeyToken(apiKey);
+        if (!fresh.token) {
+          const email = typeof claims.email === 'string' ? claims.email : null;
+          return cursorShape({ email, login: { expiresAt: null, signedOut: fresh.refused ? fresh.reason : null, notice: null }, reason: fresh.reason });
+        }
+        token = fresh.token;
+      }
+    }
+    const seed = apiKey ? `cursor-api-key\0${apiKey}` : undefined;
     const result = await remote(`cursor:${file}`, CURSOR_USAGE_URL, token, null, (body, time) => {
       const window = cursorWindow(body);
       if (!window) return null;
@@ -384,7 +466,7 @@ function createPlanUsageProvider({
         email: typeof body.email === 'string' ? body.email : null,
         updatedAt: new Date(time).toISOString(),
       };
-    });
+    }, seed);
     const sample = result.value;
     const email = sample?.email || (typeof claims.email === 'string' ? claims.email : null);
     return cursorShape({ email, sample, login, reason: result.reason });

@@ -1,7 +1,9 @@
 'use strict';
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { cliCommand } = require('./cli-command.js');
+const { cursorAuthEnv } = require('../../shared/cursor-auth.cjs');
 
 function parseCursorModels(text) {
   const rows = [];
@@ -37,7 +39,9 @@ function createCursorModelCatalog(options = {}) {
     pending = (async () => {
       try {
         const command = cliCommand(env.HARBOR_CURSOR_BIN || options.bin || 'cursor-agent', ['models'], options.platform);
-        const { stdout } = await execFile(command.file, command.args, { env, windowsHide: true, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
+        // With the stored API key: a keyless run deletes an API-key sign-in.
+        const authEnv = cursorAuthEnv(env, { home: options.home || os.homedir(), platform: options.platform || process.platform });
+        const { stdout } = await execFile(command.file, command.args, { env: authEnv, windowsHide: true, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
         const models = parseCursorModels(stdout);
         if (!models.length) return { ok: false, reason: 'Cursor returned no model rows' };
         await fs.promises.mkdir(path.dirname(cacheFile), { recursive: true });

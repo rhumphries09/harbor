@@ -636,8 +636,15 @@ test('install records a successful history entry and re-reads the installed vers
 test('a same-day cursor rebuild installs as success but history names the build on disk', async (t) => {
   const fixture = await makeHome();
   t.after(() => fsp.rm(fixture.root, { recursive: true, force: true }));
+  // A stored API key travels with the update run (cursor-agent deletes an
+  // API-key sign-in on any run without it).
+  const authFile = path.join(fixture.home, 'AppData', 'Roaming', 'Cursor', 'auth.json');
+  await fsp.mkdir(path.dirname(authFile), { recursive: true });
+  await fsp.writeFile(authFile, JSON.stringify({ accessToken: 'a', refreshToken: 'r', apiKey: 'synthetic-key' }));
+  let updateEnv = null;
   const checker = checkerFor(fixture, {
-    execFile: async () => {
+    execFile: async (file, args, options) => {
+      updateEnv = options.env;
       // cursor-agent update ignores the reviewed build and takes the newest one.
       await fsp.mkdir(path.join(fixture.root, 'local', 'cursor-agent', 'versions', '2026.09.02-aaaaaaa'), { recursive: true });
       return { stdout: 'Latest version available: 2026.09.02-aaaaaaa\nDone\n', stderr: '' };
@@ -650,6 +657,7 @@ test('a same-day cursor rebuild installs as success but history names the build 
   const entry = (await checker.state()).providers.cursor.history[0];
   assert.equal(entry.to, '2026.09.02-aaaaaaa', 'history records what is on disk');
   assert.equal(entry.requested, '2026.09.02-c22c1a3', 'and keeps the reviewed build that was asked for');
+  assert.equal(updateEnv?.CURSOR_API_KEY, 'synthetic-key');
 });
 
 test('a failed install records the failure and never claims the new version', async () => {

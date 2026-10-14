@@ -60,7 +60,7 @@ test('Cursor captured catalog is cached, served synchronously, and chosen model 
   const cacheFile = path.join(home, 'cursor-models.json');
   const stdout = await fs.readFile(path.join(__dirname, '../fixtures/cursor-models-2026-09-20.txt'), 'utf8');
   const calls = [];
-  const catalog = createCursorModelCatalog({ cacheFile, env: {}, platform: 'win32', bin: 'cursor-agent.cmd',
+  const catalog = createCursorModelCatalog({ cacheFile, env: {}, home, platform: 'win32', bin: 'cursor-agent.cmd',
     execFile: async (...args) => { calls.push(args); return { stdout }; } });
   assert.equal(catalog.models().length, 1);
   assert.equal((await catalog.refresh()).ok, true);
@@ -70,7 +70,15 @@ test('Cursor captured catalog is cached, served synchronously, and chosen model 
   assert.equal(calls[0][0], 'cmd.exe');
   assert.equal(calls[0][2].windowsHide, true);
   assert.ok(calls[0][2].timeout > 0 && calls[0][2].timeout <= 30000);
-  const cached = createCursorModelCatalog({ cacheFile, env: {}, execFile: async () => { throw Error('offline'); } });
+  // No stored API key in this home: the env goes through untouched.
+  assert.equal(calls[0][2].env.CURSOR_API_KEY, undefined);
+  // With one, `models` carries it: a keyless run deletes an API-key sign-in.
+  const authFile = path.join(home, 'AppData', 'Roaming', 'Cursor', 'auth.json');
+  await fs.mkdir(path.dirname(authFile), { recursive: true });
+  await fs.writeFile(authFile, JSON.stringify({ accessToken: 'a', refreshToken: 'r', apiKey: 'synthetic-key' }));
+  assert.equal((await catalog.refresh()).ok, true);
+  assert.equal(calls[1][2].env.CURSOR_API_KEY, 'synthetic-key');
+  const cached = createCursorModelCatalog({ cacheFile, env: {}, home, execFile: async () => { throw Error('offline'); } });
   assert.deepEqual(cached.models(), catalog.models());
   assert.equal((await cached.refresh()).ok, false);
   assert.deepEqual(cached.models(), catalog.models());

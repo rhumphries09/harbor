@@ -208,14 +208,83 @@ test('plan-usage-network skips expired access tokens for both providers without 
   f.clean(result);
 });
 
-test('plan-usage-network: an expired Cursor sign-in with an API key still refreshes on its next run', async (t) => {
+// An API-key sign-in's tokens last one hour and cursor-agent renews them only
+// while it runs, so Harbor trades the key itself (2026-10-13), the way
+// cursor-agent does, and keeps the traded token in memory only.
+const EXCHANGE = 'https://api2.cursor.sh/auth/exchange_user_api_key';
+
+test('plan-usage-network trades a stored Cursor API key when the stored token is stale', async (t) => {
+  const f = fixture(t);
+  const apiKey = 'synthetic-cursor-api-key';
+  f.cursor(NOW / 1000 - 1, { apiKey });
+  const traded = `synthetic.${Buffer.from(JSON.stringify({ exp: NOW / 1000 + 3600, type: 'api_key_token' })).toString('base64url')}.traded`;
+  f.secrets.push(traded);
+  f.dispatch((url, options) => {
+    if (url === EXCHANGE) {
+      assert.equal(options.method, 'POST');
+      assert.equal(options.redirect, 'error');
+      assert.equal(options.body, '{}');
+      assert.deepEqual(options.headers, { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' });
+      return response({ accessToken: traded, refreshToken: traded });
+    }
+    assert.equal(url, CURSOR);
+    assert.equal(options.headers.authorization, `Bearer ${traded}`);
+    return response({ planUsage: { totalPercentUsed: 4 } });
+  });
+  const usage = { getUsage: async () => ({}) };
+  const provider = f.provider({ usageProvider: usage });
+  const first = await provider.getPlans();
+  const row = plan(first, 'cursor');
+  assert.equal(row.unavailable, false);
+  assert.equal(row.signedOut, false);
+  assert.equal(row.windows[0].usedPct, 4);
+  assert.deepEqual(f.calls.map((c) => c.url), [EXCHANGE, CURSOR]);
+  f.clean(first);
+  // Past the cooldown, the same provider reuses the traded token: no new exchange,
+  // and a new token for the same key is not "sign-in changed".
+  f.advance(61_000);
+  const second = await provider.getPlans();
+  assert.equal(plan(second, 'cursor').windows[0].usedPct, 4);
+  assert.deepEqual(f.calls.map((c) => c.url), [EXCHANGE, CURSOR, CURSOR]);
+  f.clean(second);
+});
+
+test('plan-usage-network uses a still-valid Cursor API-key token without trading the key', async (t) => {
+  const f = fixture(t);
+  const token = f.cursor(NOW / 1000 + 3000, { apiKey: 'synthetic-cursor-api-key' });
+  f.dispatch((url, options) => {
+    assert.equal(url, CURSOR);
+    assert.equal(options.headers.authorization, `Bearer ${token}`);
+    return response({ planUsage: { totalPercentUsed: 4 } });
+  });
+  const row = plan(await f.provider({ usageProvider: { getUsage: async () => ({}) } }).getPlans(), 'cursor');
+  assert.equal(row.windows[0].usedPct, 4);
+  assert.equal(row.signInNotice, null);
+  assert.deepEqual(f.calls.map((c) => c.url), [CURSOR]);
+});
+
+test('plan-usage-network reads a refused Cursor API key as signed out', async (t) => {
   const f = fixture(t);
   f.cursor(NOW / 1000 - 1, { apiKey: 'synthetic-cursor-api-key' });
-  const row = plan(await f.provider().getPlans(), 'cursor');
+  f.dispatch((url) => {
+    assert.equal(url, EXCHANGE);
+    return { ok: false, status: 401, json: async () => ({}) };
+  });
+  const result = await f.provider({ usageProvider: { getUsage: async () => ({}) } }).getPlans();
+  const row = plan(result, 'cursor');
+  assert.equal(row.unavailable, true);
+  assert.equal(row.signedOut, true);
+  assert.match(row.reason, /^Cursor refused its stored API key \(HTTP 401\)/);
+  assert.deepEqual(f.calls.map((c) => c.url), [EXCHANGE]);
+  f.clean(result);
+});
+
+test('plan-usage-network never trades a Cursor API key while usage checks are off', async (t) => {
+  const f = fixture(t);
+  f.cursor(NOW / 1000 - 1, { apiKey: 'synthetic-cursor-api-key' });
+  const row = plan(await f.provider({ env: { HARBOR_NO_USAGE_FETCH: '1' }, usageProvider: { getUsage: async () => ({}) } }).getPlans(), 'cursor');
   assert.equal(f.calls.length, 0);
-  assert.equal(row.reason, 'Login token expired; it refreshes the next time cursor runs.');
-  assert.equal(row.signedOut, false);
-  assert.equal(row.signInExpiresAt, null);
+  assert.match(row.reason, /disabled/);
 });
 
 test('plan-usage-network warns in the last week of a Cursor browser sign-in, and only then', async (t) => {

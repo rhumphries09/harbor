@@ -7,6 +7,7 @@ const { spawnSync } = require('node:child_process');
 const { createHistoryIndex } = require('../app/src/main/providers/history-index.js');
 const { SessionClient } = require('../app/src/daemon/client.js');
 const { defaultConfigFile } = require('../app/src/shared/tasks-file.cjs');
+const { cursorAuthEnv } = require('../app/src/shared/cursor-auth.cjs');
 
 const BIN_DIR = __dirname;
 const ROOT = path.dirname(BIN_DIR);
@@ -318,8 +319,12 @@ function cleanDaemonEnv() {
   return env;
 }
 
-function sessiondChildEnv(sourceEnv = process.env) {
+function sessiondChildEnv(sourceEnv = process.env, { agent = null } = {}) {
   const env = cleanDaemonEnv();
+  // A cursor pane carries its API key (cursor-agent deletes an API-key sign-in
+  // on any run without it, 2026-10-13). Cursor panes only: the allowlist exists
+  // to keep keys out of every other child.
+  if (agent === 'cursor' && sourceEnv.CURSOR_API_KEY) env.CURSOR_API_KEY = sourceEnv.CURSOR_API_KEY;
   if (sourceEnv.CLAUDE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = sourceEnv.CLAUDE_CONFIG_DIR;
   if (sourceEnv.CODEX_HOME) env.CODEX_HOME = sourceEnv.CODEX_HOME;
   // Claude's prompt suggestions (the command bar offers them on Tab, see
@@ -341,7 +346,7 @@ async function spawnSessiond({ argv, cwd, env, agent, agentSession }) {
     return await client.request('spawn', {
       argv,
       cwd,
-      env: sessiondChildEnv(env),
+      env: sessiondChildEnv(env, { agent }),
       cols: 120,
       rows: 60,
       agent,
@@ -726,6 +731,9 @@ async function ai(args) {
     if (parsed.provider === 'claude') childEnv.CLAUDE_CONFIG_DIR = selected.configHome;
     if (parsed.provider === 'codex') childEnv.CODEX_HOME = selected.configHome;
   }
+  // A cursor pane or resume carries a stored API key: cursor-agent DELETES an
+  // API-key sign-in on any run that does not pass the key (2026-10-13).
+  if (parsed.provider === 'cursor') Object.assign(childEnv, cursorAuthEnv(childEnv));
   // Against the home the child will read (the profile's, else an inherited
   // CODEX_HOME, else ~/.codex: the same order codex-model-catalog.js reads).
   if (parsed.provider === 'codex') {

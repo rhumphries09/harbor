@@ -27,6 +27,7 @@
 
 const path = require('node:path');
 const { cliCommand } = require('./cli-command.js');
+const { cursorAuthEnv } = require('../../shared/cursor-auth.cjs');
 
 const NPM_REGISTRY = 'https://registry.npmjs.org';
 const CLAUDE_CHANGELOG_URL = 'https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md';
@@ -1255,6 +1256,8 @@ function createCliUpdateChecker(options = {}) {
         windowsHide: true,
         timeout: 10 * 60 * 1000,
         maxBuffer: 8 * 1024 * 1024,
+        // cursor-agent deletes an API-key sign-in on any run that does not pass the key.
+        ...(id === 'cursor' ? { env: cursorAuthEnv(env, { home }) } : {}),
       });
       output = `${result?.stdout || ''}${result?.stderr || ''}`;
       ok = true;
