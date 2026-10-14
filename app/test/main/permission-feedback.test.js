@@ -1,10 +1,19 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { createSessionSend } = require('../../src/main/session-send.js');
 const { parseMenu } = require('../../src/main/menu-parse.js');
 const { fixture } = require('../support/permission-dialog-fixtures.js');
 const message = 'Keep the red toy unchanged.';
+// The send log and its captures default to the user's real ~/.cache/harbor.
+// Found 2026-10-14: every run of this file had added rows for pane "p" to the
+// real send log since at least 2026-10-08, in the log a send failure is
+// diagnosed from.
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-permission-feedback-'));
+test.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
 for (const [kind, question] of [['edit', 'Do you want to make this edit to toy.txt?'], ['write', 'Do you want to create toy.txt?']]) {
   test(`${kind}: separate the live native question from request details`, () => {
     const menu = parseMenu((fixture(kind) + '\nEsc to cancel · Tab to amend').replace('Do you want to proceed?', question));
@@ -24,6 +33,8 @@ function harness({ kind = 'edit', destination = 'composer', dropArrows = false, 
     return [echoed, edge, '❯ ' + draft, edge].join('\n');
   };
   const send = createSessionSend({ readPane: read, sleep: async () => {},
+    sendLogFile: path.join(stateDir, 'send-log.jsonl'),
+    captureDir: path.join(stateDir, 'unrecognized-dialogs'),
     terminalBridge: { getState: () => ({ controlledPaneId: 'p' }), ensureDialogSize: async () => {}, sendInput: (_, text) => {
       sent.push(text);
       if (!rejected) {
