@@ -54,7 +54,14 @@ function nonnegative(value, fallback) {
 }
 
 const watchIntervalMs = nonnegative(process.env.HARBOR_SESSIOND_WATCH_INTERVAL_MS, 15000);
-const watchTimeoutMs = nonnegative(process.env.HARBOR_SESSIOND_WATCH_TIMEOUT_MS, 5000) || 5000;
+// A WEDGE NEVER ANSWERS; A BUSY DAEMON ANSWERS LATE (2026-10-14). With a 5 s
+// budget, a daemon stalling 5-12 s at a time under load (about fourteen busy
+// sessions) failed three probes in a row and was killed twice in twelve
+// minutes. Each kill dropped every client, put "Terminal daemon unreachable"
+// on screen, and handed the same load to a successor that stalled within
+// seconds. 30 s still catches a real wedge (it never answers at all) and
+// leaves a slow daemon alone.
+const watchTimeoutMs = nonnegative(process.env.HARBOR_SESSIOND_WATCH_TIMEOUT_MS, 30000) || 30000;
 const watchFailures = nonnegative(process.env.HARBOR_SESSIOND_WATCH_FAILURES, 3) || 3;
 const pipeReleaseTimeoutMs = nonnegative(process.env.HARBOR_SESSIOND_PIPE_RELEASE_TIMEOUT_MS, 5000) || 5000;
 const respawnMax = nonnegative(process.env.HARBOR_SESSIOND_RESPAWN_MAX, 5);

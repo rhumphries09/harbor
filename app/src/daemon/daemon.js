@@ -263,6 +263,117 @@ function keeperRequest(id, verb, params, onEvent, timeoutMs = keeperRequestTimeo
   });
 }
 
+// ONE RELAY PER CLIENT AND PANE, AND IT HAS BRAKES (2026-10-14). `observe`
+// used to forward every keeper event straight into the client's socket and
+// lived until that WHOLE connection closed, which for Harbor's stream
+// supervisor is the life of the app. Two failures followed, both measured
+// with scripts/load-sessiond-win.js against an isolated daemon:
+//   - Nothing stopped a relay. Harbor's detach only forgot the pane locally,
+//     so every >_ toggle left a relay running and the next one added another:
+//     the same pane's output crossed the daemon N times (5 relays per pane:
+//     14 MB/s and a fifth of a core; 20: 56 MB/s and 69%).
+//   - Nothing slowed one down. A client that read slower than its sessions
+//     wrote (Harbor's main process blocks for seconds under load, 0.3-6 s
+//     all afternoon on 2026-10-14) had every frame queued in this process:
+//     886 MB RSS in 40 seconds. That evening the live daemon stalled 5-12 s at
+//     a time at 300-686 MB with about fourteen sessions working, and was
+//     killed as wedged twice.
+// Now a client holds at most one relay per pane (a repeat observe joins it),
+// `unobserve` ends it, and when the client's socket is full the KEEPER side is
+// paused until it drains. The keeper's ObserverWriter then drops frames and
+// reports how many (`stream-degraded`), which the app answers with a backfill,
+// so the backlog stays bounded in the keeper's pipe instead of growing here.
+const relaysBySocket = new Map(); // client socket -> Map<session id, relay>
+const relayStats = { events: 0, bytes: 0, pauses: 0 };
+
+function relaysOf(socket) {
+  let relays = relaysBySocket.get(socket);
+  if (!relays) {
+    relays = new Map();
+    relaysBySocket.set(socket, relays);
+    socket.on('drain', () => { for (const relay of relays.values()) relay.resume(); });
+    socket.once('close', () => {
+      relaysBySocket.delete(socket);
+      for (const relay of relays.values()) relay.close();
+      relays.clear();
+    });
+  }
+  return relays;
+}
+
+function relayCount() {
+  let count = 0;
+  for (const relays of relaysBySocket.values()) count += relays.size;
+  return count;
+}
+
+// What the daemon is carrying, for the heartbeat and every lag line: on
+// 2026-10-14 the log said THAT it lagged and nothing about WHY, so the cause
+// had to be rebuilt in a harness afterwards. Counters reset each heartbeat.
+function loadSummary() {
+  let backlog = 0;
+  for (const client of clients) backlog = Math.max(backlog, client.writableLength || 0);
+  return `clients=${clients.size} relays=${relayCount()} relayed_kb=${Math.round(relayStats.bytes / 1024)} relay_pauses=${relayStats.pauses} backlog_kb_max=${Math.round(backlog / 1024)}`;
+}
+
+function startRelay(socket, id, params) {
+  const relays = relaysOf(socket);
+  const existing = relays.get(id);
+  if (existing) return existing.ready;
+  let keeper = null;
+  let paused = false;
+  let closed = false;
+  const relay = {
+    ready: null,
+    resume() {
+      if (!paused || closed) return;
+      paused = false;
+      keeper?.resume();
+    },
+    close() {
+      closed = true;
+      keeper?.destroy();
+    },
+  };
+  const forward = (event) => {
+    if (closed || socket.destroyed || !socket.writable) return;
+    const line = `${JSON.stringify({ type: 'event', event })}\n`;
+    relayStats.events += 1;
+    relayStats.bytes += line.length;
+    if (socket.write(line) === false && !paused) {
+      paused = true;
+      relayStats.pauses += 1;
+      keeper?.pause();
+    }
+  };
+  relay.ready = keeperRequest(id, 'observe', params, forward).then((forwarded) => {
+    keeper = forwarded.socket;
+    if (closed) keeper.destroy();
+    else {
+      if (paused) keeper.pause();
+      // The session ended (or its keeper went away): a later observe must be
+      // free to start a fresh relay rather than join a dead one.
+      keeper.once('close', () => { if (relays.get(id) === relay) relays.delete(id); });
+    }
+    return forwarded.result;
+  }, (error) => {
+    if (relays.get(id) === relay) relays.delete(id);
+    throw error;
+  });
+  relays.set(id, relay);
+  return relay.ready;
+}
+
+function stopRelay(socket, id) {
+  const relays = relaysBySocket.get(socket);
+  const relay = relays?.get(id);
+  if (relay) {
+    relays.delete(id);
+    relay.close();
+  }
+  return { observing: false };
+}
+
 async function spawnSession(params) {
   if (!Array.isArray(params.argv) || params.argv.length === 0 || params.argv.some((part) => typeof part !== 'string')) throw new Error('spawn argv must be a non-empty string array');
   if (!path.isAbsolute(params.cwd || '')) throw new Error('spawn cwd must be an absolute path');
@@ -525,14 +636,14 @@ async function dispatch(socket, record) {
     return { wedging: true };
   }
   if (record.verb === 'spawn') return spawnSession(params);
-  if (!['observe', 'input', 'resize', 'screen', 'process', 'terminate', 'annotate'].includes(record.verb)) throw new Error(`unsupported verb: ${record.verb}`);
+  if (!['observe', 'unobserve', 'input', 'resize', 'screen', 'process', 'terminate', 'annotate'].includes(record.verb)) throw new Error(`unsupported verb: ${record.verb}`);
   const id = params.id;
   if (typeof id !== 'string' || !id) throw new Error(`${record.verb} requires id`);
+  if (record.verb === 'observe') return startRelay(socket, id, params);
+  if (record.verb === 'unobserve') return stopRelay(socket, id);
   try {
     const forwarded = await keeperRequest(id, record.verb, params, (event) => writeRecord(socket, { type: 'event', event }));
-    if (record.verb === 'observe') {
-      socket.on('close', () => forwarded.socket.destroy());
-    } else forwarded.socket.destroy();
+    forwarded.socket.destroy();
     return forwarded.result;
   } catch (error) {
     if (record.verb === 'process') {
@@ -1191,7 +1302,10 @@ async function start() {
   if (rssIntervalMs > 0) {
     const rssTimer = setInterval(() => {
       const memory = process.memoryUsage();
-      log(`rss pid=${process.pid} rss_bytes=${memory.rss} heap_used_bytes=${memory.heapUsed} sessions=${allStates().length}`);
+      log(`rss pid=${process.pid} rss_bytes=${memory.rss} heap_used_bytes=${memory.heapUsed} sessions=${allStates().length} ${loadSummary()}`);
+      relayStats.events = 0;
+      relayStats.bytes = 0;
+      relayStats.pauses = 0;
     }, rssIntervalMs);
     rssTimer.unref();
   }
@@ -1204,7 +1318,7 @@ async function start() {
   const lagTimer = setInterval(() => {
     const lag = Date.now() - lagLastTick - 5000;
     lagLastTick = Date.now();
-    if (lag >= lagLogMs) log(`event loop lag observed: ${lag}ms`);
+    if (lag >= lagLogMs) log(`event loop lag observed: ${lag}ms (${loadSummary()})`);
   }, 5000);
   lagTimer.unref();
   server.listen(listenAddress(paths.socket), () => {

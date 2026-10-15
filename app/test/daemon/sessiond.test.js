@@ -96,6 +96,54 @@ afterEach(async () => {
   while (cleanups.length) await cleanups.pop()();
 });
 
+// ONE RELAY PER CONNECTION AND PANE (2026-10-14). Harbor's detach never told
+// the daemon, so every >_ toggle added another relay of the same pane on the
+// same connection and the daemon carried its output N times. Two-sided against
+// a reference connection observing once: before the fix the doubly-attached
+// connection saw every marker twice as often, and unobserve did not exist.
+test('a repeat observe joins the relay, unobserve ends it, and observe brings it back', async () => {
+  const h = await harness();
+  const spawned = await h.client.request('spawn', {
+    argv: SHELL_ARGV, cwd: h.dir, env: { PS1: 'HARBOR_TEST> ' }, cols: 80, rows: 24,
+  });
+  const reference = new SessionClient({ socketPath: h.socketPath });
+  cleanups.push(async () => reference.close());
+  const mine = [];
+  const theirs = [];
+  h.client.onEvent((event) => mine.push(event));
+  reference.onEvent((event) => theirs.push(event));
+  const count = (events, marker) => events
+    .filter((event) => event.type === 'frame' && event.id === spawned.id)
+    .map((event) => event.text).join('').split(marker).length - 1;
+  const say = (word) => h.client.request('input', {
+    id: spawned.id,
+    text: process.platform === 'win32' ? `echo ${word}\r` : `printf '${word}\\n'\n`,
+  });
+  const settled = async (marker) => {
+    await waitUntil(() => count(theirs, marker) >= 2, `the reference connection never saw ${marker}`);
+    await sleep(600);
+  };
+
+  await h.client.request('observe', { id: spawned.id });
+  await h.client.request('observe', { id: spawned.id });
+  await reference.request('observe', { id: spawned.id });
+  await say('RELAYED_ONCE');
+  await settled('RELAYED_ONCE');
+  assert.equal(count(mine, 'RELAYED_ONCE'), count(theirs, 'RELAYED_ONCE'),
+    'a second observe on the same connection must not double the stream');
+
+  assert.deepEqual(await h.client.request('unobserve', { id: spawned.id }), { observing: false });
+  await say('AFTER_UNOBSERVE');
+  await settled('AFTER_UNOBSERVE');
+  assert.equal(count(mine, 'AFTER_UNOBSERVE'), 0, 'unobserve must end the relay');
+  assert.ok(count(theirs, 'AFTER_UNOBSERVE') >= 2, 'and leave other connections streaming');
+
+  await h.client.request('observe', { id: spawned.id });
+  await say('OBSERVED_AGAIN');
+  await settled('OBSERVED_AGAIN');
+  assert.equal(count(mine, 'OBSERVED_AGAIN'), count(theirs, 'OBSERVED_AGAIN'), 'a fresh observe streams again, once');
+});
+
 test('seven session verbs drive a real pty and preserve its screen across resize', async () => {
   const h = await harness();
   const spawned = await h.client.request('spawn', {

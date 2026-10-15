@@ -41,7 +41,7 @@ const {
 } = require('./actions/orchestration.js');
 const { createTerminalBridge } = require('./terminal-bridge.js');
 const { deleteSessionTranscript } = require('./session-delete.js');
-const { createControlClient } = require('./session-daemon/factory.js');
+const { createControlClient, pingDaemonOnce } = require('./session-daemon/factory.js');
 const { startLagMonitor } = require('./lag-monitor.js');
 const { createGpuTelemetry } = require('./gpu-telemetry.js');
 const { createCrashCapture } = require('./crash-capture.js');
@@ -150,7 +150,7 @@ function broadcastDaemonBanner() {
 async function connectDaemon({ recover = false } = {}) {
   const pingOnce = async () => {
     try {
-      await createControlClient({ env: process.env, sessionStorePolicy }).ping();
+      await pingDaemonOnce({ env: process.env, sessionStorePolicy });
       return null;
     } catch (error) { return error; }
   };
@@ -605,6 +605,7 @@ async function runVerifyTerminal(window) {
       if (echoed) break;
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
+    verifyClient.close();
     console.log('VERIFY_TERMINAL_ROUNDTRIP', JSON.stringify({ marker: roundtripMarker, echoed }));
     if (!echoed) {
       console.error('typed input roundtrip failed: marker not visible in focused pane');
@@ -3161,7 +3162,9 @@ app.whenReady().then(async () => {
   // Disabled for harnesses: they own their daemon and their app lifetime.
   if (!e2eMode && process.env.HARBOR_NO_DAEMON_START !== '1') {
     daemonWatchdog = createDaemonWatchdog({
-      ping: () => createControlClient({ env: process.env, sessionStorePolicy }).ping(),
+      // 30 s, like daemon-watch: a busy daemon answers late, only a wedged one
+      // never answers (2026-10-14).
+      ping: () => pingDaemonOnce({ env: process.env, sessionStorePolicy, requestTimeoutMs: 30_000 }),
       onWedge: createWedgeRecovery({
         connectDaemon,
         setBanner: (banner) => { daemonBanner = banner; broadcastDaemonBanner(); },

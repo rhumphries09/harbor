@@ -42,4 +42,18 @@ function createStreamSupervisor(options = {}) {
   return new Supervisor({ socketPath: options.sessionSocketPath || env.HARBOR_SESSIOND_SOCKET, env });
 }
 
-module.exports = { BACKEND_ENV, resolveSessionBackend, createControlClient, createStreamSupervisor };
+// One health question on its own connection, closed afterwards. Every caller
+// that pinged through a fresh client and walked away left that connection open
+// on both ends for the life of the process: the app's watchdog alone did it
+// every 30 s, measured as four new daemon handles a minute (2026-10-14: 1,105
+// handles on a daemon serving five sessions).
+async function pingDaemonOnce(options = {}) {
+  const client = createControlClient(options);
+  try {
+    return await client.ping();
+  } finally {
+    try { client.close(); } catch { /* already gone */ }
+  }
+}
+
+module.exports = { BACKEND_ENV, resolveSessionBackend, createControlClient, createStreamSupervisor, pingDaemonOnce };

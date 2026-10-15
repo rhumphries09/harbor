@@ -193,7 +193,9 @@ function createTerminalBridge(options = {}) {
       // pane's observer through the normal attach+backfill path.
       const panes = [...visiblePanes.entries()].map(([paneId, size]) => ({ paneId, ...size }));
       visiblePanes.clear();
-      supervisor.detach();
+      // reset, not detach: detach also stops listening, which left every
+      // re-attached pane frozen (streams.js reset).
+      supervisor.reset();
       await applyVisiblePanes(panes);
       emitter.emit('connection-restored');
     } catch {
@@ -276,6 +278,28 @@ function createTerminalBridge(options = {}) {
   supervisor.on('control-released', ({ paneId }) => {
     if (controlledPaneId === paneId) controlledPaneId = null;
     emitControlState(paneId, 'released');
+  });
+
+  // Frames were dropped upstream (the keeper sheds them while this app reads
+  // slower than the session writes, by design since 2026-10-14; see the relay
+  // notes in daemon.js). The view now misses output, so repaint it from the
+  // pane's own history, the same path a re-attach takes. One resync at a time
+  // per pane: a burst of warnings must not stack backfills.
+  const resyncing = new Set();
+  supervisor.on('warning', async ({ paneId, type }) => {
+    if (type !== 'stream-degraded' || closed || !visiblePanes.has(paneId) || resyncing.has(paneId)) return;
+    resyncing.add(paneId);
+    try {
+      holdFrames(paneId);
+      emitter.emit('reset', { paneId });
+      await backfillPane(paneId);
+      releaseFrames(paneId);
+    } catch (error) {
+      heldFrames.delete(paneId);
+      emitter.emit('error', error);
+    } finally {
+      resyncing.delete(paneId);
+    }
   });
 
   const backfillPane = async (paneId) => {

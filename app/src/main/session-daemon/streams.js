@@ -89,11 +89,30 @@ class SessionStreamSupervisor extends EventEmitter {
     this._pendingRelease = { paneId, timer };
   }
   cancelScheduledRelease() { if (this._pendingRelease) clearTimeout(this._pendingRelease.timer); this._pendingRelease = null; }
+  // A pane detach tells the DAEMON too (2026-10-14). It used to forget the pane
+  // only here, so the daemon kept relaying every frame of it for the life of
+  // the connection, and each later attach added another relay of the same
+  // pane. A daemon older than `unobserve` answers "unsupported verb", which is
+  // fine: it has nothing better to offer.
   detach(paneId) {
-    if (paneId) { this.observers.delete(paneId); this.releaseControl(paneId); return; }
+    if (paneId) {
+      this.observers.delete(paneId);
+      this.releaseControl(paneId);
+      this.client.request('unobserve', { id: paneId }).catch(() => {});
+      return;
+    }
+    this.reset();
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+  }
+
+  // Drop every stream and the connection, but KEEP LISTENING: the reconnect
+  // path re-attaches through this same supervisor. It used to call detach(),
+  // which also removed the one event listener, so after any daemon reconnect
+  // every >_ view stopped receiving frames until the app restarted (2026-10-14).
+  reset() {
     this.observers.clear();
     this.controller = null;
-    this.unsubscribe?.();
     this.client.close();
   }
   childPids() { return []; }

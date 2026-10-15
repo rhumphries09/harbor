@@ -11,7 +11,7 @@ const { METHOD_CHANNELS } = require('../main/rpc/channels.js');
 const { createConfigStore } = require('../main/config/store.js');
 const { createSidebarBridge } = require('../main/sidebar-bridge.js');
 const { createTerminalBridge } = require('../main/terminal-bridge.js');
-const { createControlClient, resolveSessionBackend } = require('../main/session-daemon/factory.js');
+const { createControlClient, pingDaemonOnce, resolveSessionBackend } = require('../main/session-daemon/factory.js');
 const { createLaunchActions } = require('../main/actions/launch.js');
 const { createPlanChange } = require('../main/actions/change-plan.js');
 const { createSessionOperationGate, createSessionOwnerProbe, createTakeoverOwner, createTakeoverHandler, startResumeFollowup } = require('../main/actions/takeover.js');
@@ -529,7 +529,7 @@ async function composeServer(options = {}) {
   // composition must never exit its runner.
   const harnessed = env.HARBOR_E2E === '1' || env.HARBOR_NO_DAEMON_START === '1' || options.skipDaemonStart;
   const linkWatchdog = options.linkWatchdog !== undefined ? options.linkWatchdog : (harnessed ? null : createLinkWatchdog({
-    ping: () => createControlClient({ env, sessionStorePolicy }).ping(),
+    ping: () => pingDaemonOnce({ env, sessionStorePolicy }),
     exit: (code) => process.exit(code),
     log: (message) => console.error(`harbor-server: ${message}`),
   }));
