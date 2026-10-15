@@ -19,6 +19,11 @@ const ITEMS = [
   { id: 'quit', label: 'Quit Harbor', hint: 'Ctrl+Shift+Q' },
   { section: 'View' },
   { id: 'reload', label: 'Reload', hint: 'Ctrl+Shift+R' },
+  // Reload refreshes the window only; a fix in Harbor's main process (the
+  // daemon client, the terminal bridge) needs the whole app restarted, and
+  // until 2026-10-15 nothing in the app offered that except the update
+  // banner, which appears only for window rebuilds. Sessions keep running.
+  { id: 'restart', label: 'Restart Harbor' },
   { id: 'zoom-in', label: 'Zoom in', hint: 'Ctrl +' },
   { id: 'zoom-out', label: 'Zoom out', hint: 'Ctrl -' },
   { id: 'zoom-reset', label: 'Reset zoom', hint: 'Ctrl 0' },
