@@ -8,7 +8,7 @@ import { AskCard } from './AskCard.jsx';
 import turnMetaHelpers from './turn-meta.cjs';
 import { AskForm } from './AskForm.jsx';
 import { PromptForm } from './PromptForm.jsx';
-import { useModelDialogs } from './use-dialog-state.js';
+import { useTerminalDialogs } from './use-dialog-state.js';
 import { cacheFreshness, describeCacheFreshness } from './cache-freshness.cjs';
 import { WorkflowStrip } from './WorkflowStrip.jsx';
 import { terminalView } from './terminal-view.cjs';
@@ -211,8 +211,8 @@ export const SessionTile = memo(forwardRef(function SessionTile({
   const header = headerForOwnedPane(session, pane, data?.header || null);
   const blocks = useMemo(() => data?.blocks || [], [data?.blocks]);
   const color = projectColor(session.project);
-  const modelDialogs = useModelDialogs();
-  const awaitingAnswer = pendingAsk && !pendingAsk.answered || modelDialogs.has(session.id);
+  const terminalDialogs = useTerminalDialogs();
+  const awaitingAnswer = pendingAsk && !pendingAsk.answered || terminalDialogs.has(session.id);
   const runState = runStateCue(session, pane, awaitingAnswer ? { ...header, blocked: true } : header);
   const lastPrompt = useMemo(() => { for (let i = blocks.length - 1; i >= 0; i -= 1) if (blocks[i].kind === 'user' && !blocks[i].queued) return blocks[i]; return null; }, [blocks]);
   const workMeter = useWorkMeter(session, pane, Boolean(header?.working) && !awaitingAnswer, lastPrompt);
@@ -460,12 +460,18 @@ export const SessionTile = memo(forwardRef(function SessionTile({
           onAnswer={(id, payload) => window.harbor.asks.answer({ id, ...payload })}
           onDecline={(id, reason) => window.harbor.asks.decline({ id, reason })}
         />
-      ) : pane && !readOnly && !showTerminal && session.provider === 'claude' ? (
+      ) : pane && !readOnly && session.provider === 'claude' ? (
+        // Mounted behind the raw terminal too, watching only, so a window left
+        // on >_ still turns the taskbar amber when a prompt appears.
+        // blockedHint is the evidence OTHER than this card's own verdict: fed
+        // back its own "waiting", a screen it could not parse would keep the
+        // unrecognized-prompt panel, and the amber, up after the answer.
         <AskCard
           pane={pane}
           sessionId={session.id}
           selected={selected}
-          blockedHint={runState?.kind === 'blocked'}
+          watchOnly={showTerminal}
+          blockedHint={Boolean(header?.blocked)}
         />
       ) : null}
     </div>

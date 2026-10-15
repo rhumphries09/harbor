@@ -674,8 +674,10 @@ export function CommandBar({
       : !canType ? disabledReason
         : externalLive ? 'This session is running outside Harbor; send it a message to adopt it first'
           : chainActive ? 'A handoff chain is already running in this session'
-            : header?.working ? 'Wait for the current turn to finish'
-              : header?.blocked ? 'Answer the question in the window first'
+            // A prompt holds its turn open, so waiting reads as working too;
+            // the prompt is the one that needs you.
+            : header?.blocked ? 'Answer the question in the window first'
+              : header?.working ? 'Wait for the current turn to finish'
                 : null;
   const runHandoffChain = () => {
     if (handoffDisabledReason) return;

@@ -15,8 +15,21 @@ const sessionTileSource = fs.readFileSync(
 );
 
 test('Ask card poll re-arms when sessionId changes after a provisional upgrade', () => {
-  assert.match(askCardSource, /}, \[paneId, sessionId, pane, blockedHint\]\)/);
+  assert.match(askCardSource, /}, \[paneId, sessionId, pane, blockedHint, watchOnly\]\)/);
   assert.doesNotMatch(askCardSource, /eslint-disable-line react-hooks\/exhaustive-deps/);
+});
+
+// 2026-10-14: a window left on its raw terminal must still mark its session
+// as waiting on you, so the card stays mounted there, watching only (it
+// renders nothing and its poll never sends a key), and every dialog it sees
+// is published, not only the model switch.
+test('the card stays mounted behind the raw terminal, watching, and publishes every dialog', () => {
+  assert.match(sessionTileSource, /watchOnly=\{showTerminal\}/);
+  assert.doesNotMatch(sessionTileSource, /!readOnly && !showTerminal && session\.provider === 'claude'/);
+  assert.match(askCardSource, /observe: watchOnly/);
+  assert.match(askCardSource, /if \(watchOnly\) return null;/);
+  assert.match(askCardSource, /const waiting = Boolean\(menu\);/);
+  assert.match(askCardSource, /dialogStore\.set\(sessionId, waiting\)/);
 });
 
 test('the session window mounts the answer sheet, and nothing else answers dialogs', () => {

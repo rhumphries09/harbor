@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { ModelSwitchCard } from './ModelSwitchCard.jsx';
 import { ScrapedPermissionCard, PermissionFeedbackFailure } from './PermissionCard.jsx';
 import { dialogStore } from './use-dialog-state.js';
+import { liveDialog as live } from './dialog-state.cjs';
 import {
   TEXT_ROW,
   buildSheet,
@@ -46,22 +47,25 @@ function FallbackScreen({ lines }) {
   return <pre className="ask-screen" ref={ref}>{text}</pre>;
 }
 
-function live(next) {
-  return next && (next.kind === 'model-switch' || next.options?.length || next.fallback) ? next : null;
-}
-
 function Keycap({ children }) {
   return <kbd className="ask-kbd">{children}</kbd>;
 }
 
 const rowKey = (q, row) => `${q}:${row}`;
 
-export function AskCard({ pane, sessionId, blockedHint, selected = false }) {
+// `watchOnly` is the window showing its raw terminal: the dialog is on screen
+// there already, so the card renders nothing, but it keeps polling (with
+// `observe`, which never sends a key) so a window left on >_ still marks its
+// session as waiting on you.
+export function AskCard({ pane, sessionId, blockedHint, selected = false, watchOnly = false }) {
   const [menu, setMenu] = useState(null);
+  // Any dialog this card would show means the session is waiting on you
+  // (dialog-state.cjs); the tile, rail and taskbar read it from the store.
+  const waiting = Boolean(menu);
   useEffect(() => {
-    dialogStore.set(sessionId, menu?.kind === 'model-switch');
+    dialogStore.set(sessionId, waiting);
     return () => dialogStore.set(sessionId, false);
-  }, [sessionId, menu?.kind]);
+  }, [sessionId, waiting]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [rawDraft, setRawDraft] = useState('');
@@ -98,7 +102,7 @@ export function AskCard({ pane, sessionId, blockedHint, selected = false }) {
       if (!alive) return;
       if (!busyRef.current) {
         try {
-          const next = await window.harbor.session.menuState({ pane, sessionId, blockedHint: blockedRef.current });
+          const next = await window.harbor.session.menuState({ pane, sessionId, blockedHint: blockedRef.current, observe: watchOnly });
           if (alive && !busyRef.current) {
             const shown = live(next);
             if (shown) { missRef.current = 0; setMenu(shown); }
@@ -110,7 +114,7 @@ export function AskCard({ pane, sessionId, blockedHint, selected = false }) {
     };
     tick();
     return () => { alive = false; if (timer) clearTimeout(timer); };
-  }, [paneId, sessionId, pane, blockedHint]);
+  }, [paneId, sessionId, pane, blockedHint, watchOnly]);
 
   const sheet = useMemo(() => menu?.kind === 'model-switch' ? null : buildSheet(menu), [menu]);
   const sheetRef = useRef(sheet);
@@ -260,6 +264,7 @@ export function AskCard({ pane, sessionId, blockedHint, selected = false }) {
     if (section?.scrollIntoView) section.scrollIntoView({ block: 'nearest' });
   }, [identity, state.q]);
 
+  if (watchOnly) return null;
   if (failedFeedback) return <PermissionFeedbackFailure {...failedFeedback} onClose={() => setFailedFeedback(null)} />;
   if (!menu) return null;
   if (menu.kind === 'model-switch') return <ModelSwitchCard menu={menu} busy={busy} error={error} onAction={run} />;

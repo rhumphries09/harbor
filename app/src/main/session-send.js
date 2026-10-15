@@ -1445,7 +1445,7 @@ function createSessionSend(deps) {
     return !HAS_CHOICE_RE.test(screen);
   };
 
-  const readFallback = async (pane, blockedHint) => {
+  const readFallback = async (pane, blockedHint, { observe = false } = {}) => {
     const paneId = pane.paneId;
     const screen = await readScreen(paneId, MENU_READ_LINES);
     const blocked = classifyBlocked(screen, blockedHint);
@@ -1455,9 +1455,10 @@ function createSessionSend(deps) {
     // costs no extra pane read and a notice chain clears itself within a second
     // or two. Returning null means no panel flashes for something Harbor is
     // dealing with; the next poll sees whatever the notice revealed, which for
-    // the last one is the trust dialog, and THAT gets a card.
+    // the last one is the trust dialog, and THAT gets a card. An observing poll
+    // (see getMenu) presses nothing; the notice is not a question either way.
     if (isFirstRunNotice(screen)) {
-      await answerMenu(paneId, pane.workspaceId, { type: 'key', key: 'enter' }).catch(() => {});
+      if (!observe) await answerMenu(paneId, pane.workspaceId, { type: 'key', key: 'enter' }).catch(() => {});
       return null;
     }
     await captureUnrecognized(paneId, screen);
@@ -2538,25 +2539,31 @@ function createSessionSend(deps) {
     return entry.promise;
   };
 
-  const getMenu = async ({ pane, blockedHint, ask } = {}) => {
+  // `observe` is the poll of a window showing the raw terminal (>_). It only
+  // answers "is a dialog up?", so the taskbar, rail and window header can say
+  // the session is waiting on you (2026-10-14: a guard permission prompt sat
+  // 24 minutes under a blue badge). The human is looking at the real terminal
+  // there and may be typing into it, so an observing poll never sends a key or
+  // resizes: no batch walk, no first-run Enter, no dialog sizing.
+  const getMenu = async ({ pane, blockedHint, ask, observe = false } = {}) => {
     if (!pane?.paneId) return null;
     // Size the pane for dialogs the first time a window polls it, which is
     // within a second of the window opening and long before Claude asks
     // anything. This is the actual fix for the clipped-question family: a
     // 23-row pane cannot draw a 35-row dialog, and no amount of parsing
     // recovers rows the pane never held.
-    terminalBridge?.ensureDialogSize?.(pane.paneId).catch?.(() => {});
+    if (!observe) terminalBridge?.ensureDialogSize?.(pane.paneId).catch?.(() => {});
     const menu = await readMenu(pane.paneId);
     // A dialog still coming back clipped means the pane is still small (the daemon
     // re-laid it out, or the first attempt was refused). Try again, because
     // Ink redraws on SIGWINCH: this heals a dialog that is already on screen.
-    if (menu?.clipped) terminalBridge?.ensureDialogSize?.(pane.paneId, { force: true }).catch?.(() => {});
+    if (menu?.clipped && !observe) terminalBridge?.ensureDialogSize?.(pane.paneId, { force: true }).catch?.(() => {});
     // No dialog, or a dialog with no strip: whatever batch this pane had is
     // over, and its questions must not label the next one (review-caught
     // 2026-09-03: a later batch with the same headers came back with the old
     // question text).
     if (!menu || !questionTabs(menu).length) discoveries.delete(pane.paneId);
-    if (!menu) return readFallback(pane, Boolean(blockedHint));
+    if (!menu) return readFallback(pane, Boolean(blockedHint), { observe });
     let merged = ask ? mergeAsk(menu, ask) : menu;
     if (merged.asked) return merged;
     // The transcript had nothing (see discoverBatch): a batch is discovered by
@@ -2568,7 +2575,7 @@ function createSessionSend(deps) {
       discoveries.delete(pane.paneId);
     }
     const batch = questionTabs(menu).length > 1 && menu.keys?.switchQuestions && !menu.keys?.amend && !isReviewMenu(menu);
-    if (!batch) return merged;
+    if (!batch || observe) return merged;
     const found = await discoverBatch(pane.paneId, pane.workspaceId, menu).catch(() => null);
     // Re-read after the walk either way: the pointer, the current question,
     // and (after a failed walk) where the dialog actually is, are all fresh.

@@ -95,6 +95,52 @@ const MAIN_PROBE = `
 })()
 `;
 
+// Main process: a TERMINAL dialog, the evidence production actually has
+// (2026-10-14: a guard permission prompt sat 24 minutes under a blue badge).
+// Scenarios 1-3 raise the question through a transcript-header flag that the
+// real transcript reader never sets, which is how they passed while the real
+// app could not go amber for a prompt drawn in the terminal. Here the menu
+// poll is answered by the REAL session-send getMenu reading a stand-in pane
+// (the harness has no daemon) that draws the measured guard-prompt layout
+// when __dialogUp is set and an idle composer otherwise. Every poll is
+// recorded, so the raw-terminal case can prove it polled with `observe`.
+const dialogProbe = (tmp) => `
+(() => {
+  const { ipcMain } = require('electron');
+  const { createSessionSend, createLinkRegistry } = require(${JSON.stringify(path.join(APP_DIR, 'src', 'main', 'session-send.js'))});
+  const { fixture } = require(${JSON.stringify(path.join(APP_DIR, 'test', 'support', 'permission-dialog-fixtures.js'))});
+  const composer = ['─'.repeat(60), '❯ ', '─'.repeat(60), '  ⏵⏵ auto mode on (shift+tab to cycle)'].join('\\n');
+  globalThis.__dialogUp = false;
+  const calls = globalThis.__menuCalls = [];
+  const keys = globalThis.__dialogKeys = [];
+  const send = createSessionSend({
+    snapshot: async () => ({ panes: [{ pane_id: 'pane-sess-a', workspace_id: 'ws-sess-a' }], workspaces: [{ workspace_id: 'ws-sess-a', label: 'badge-proj' }] }),
+    readPane: async () => (globalThis.__dialogUp ? fixture('guard') : composer),
+    terminalBridge: {
+      getState: () => ({ controlledPaneId: 'pane-sess-a' }),
+      requestFocusPane: async () => ({ ok: true }),
+      sendInput: (_paneId, text) => { keys.push(text); return { ok: true }; },
+      ensureDialogSize: async () => ({ ok: true }),
+    },
+    launchActions: { resumeSession: async () => {} },
+    getSessionMeta: async () => ({ cwd: 'C:/dev/badge-proj' }),
+    links: createLinkRegistry(),
+    projectLabelForCwd: () => 'badge-proj',
+    sleep: async () => {},
+    setXClipboardImage: async () => {},
+    captureDir: ${JSON.stringify(path.join(tmp, 'unrecognized-dialogs'))},
+    sendLogFile: ${JSON.stringify(path.join(tmp, 'send-log.jsonl'))},
+  });
+  ipcMain.removeHandler('session:menu-state');
+  ipcMain.handle('session:menu-state', async (_event, payload) => {
+    calls.push({ t: Date.now(), sessionId: payload && payload.sessionId, observe: Boolean(payload && payload.observe) });
+    if (!payload || payload.sessionId !== 'sess-a') return null;
+    return send.getMenu(payload);
+  });
+  return true;
+})()
+`;
+
 // Page: a two-session model, both live and open as windows.
 const PAGE_DRIVER = `
 (() => {
@@ -146,6 +192,20 @@ const PAGE_DRIVER = `
       return n;
     },
     attention() { return window.__harborAttention; },
+    // Flip sess-a's window to its raw terminal (>_), the way a click does.
+    rawTerminal() {
+      const tile = document.querySelector('[data-session-id="sess-a"]');
+      const button = tile && tile.querySelector('button[title^="Raw terminal"]');
+      if (!button) return false;
+      button.click();
+      return true;
+    },
+    // The answer card in sess-a's window, if one is drawn (a question card is
+    // .ask, a permission card .permission-prompt).
+    cardShown() {
+      const tile = document.querySelector('[data-session-id="sess-a"]');
+      return Boolean(tile && tile.querySelector('.ask, .permission-prompt'));
+    },
   };
   return 'installed';
 })()
@@ -157,8 +217,24 @@ async function main() {
   fs.mkdirSync(userData, { recursive: true });
   const config = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.harbor', 'config.json'), 'utf8'));
   config.setup = { completed: true, completedAt: new Date().toISOString(), appVersion: '0.1.0' };
+  // An EMPTY transcripts folder: the drive fabricates its own rail, and the
+  // window waits on the history scan, which in this empty cache would read the
+  // whole real corpus cold (over four minutes on 2026-10-14, heavy disk and
+  // CPU work on a machine whose live daemon was already struggling).
+  fs.mkdirSync(path.join(tmp, 'projects'), { recursive: true });
+  // And an empty HOME: under HARBOR_E2E the codex, cursor and delegation scans
+  // run with no cache by design, and against the real stores they no longer
+  // finished before the window was due (the window waits on them).
+  // Electron resolves appData from these, and fails to start without them.
+  const home = path.join(tmp, 'home');
+  const appData = path.join(home, 'AppData', 'Roaming');
+  const localAppData = path.join(home, 'AppData', 'Local');
+  for (const dir of [appData, localAppData]) fs.mkdirSync(dir, { recursive: true });
+  // Codex profiles name their real stores outright, so they go too.
+  config.profiles = (config.profiles || []).filter((profile) => (profile.provider || 'claude') === 'claude');
   config.paths = {
     ...config.paths,
+    projectsDir: path.join(tmp, 'projects'),
     cacheDir: path.join(tmp, 'cache'),
     tasksFile: path.join(tmp, 'tasks.json'),
     projectIconsDir: path.join(tmp, 'project-icons'),
@@ -185,6 +261,10 @@ async function main() {
     ], {
       env: {
         ...process.env,
+        USERPROFILE: home,
+        HOME: home,
+        APPDATA: appData,
+        LOCALAPPDATA: localAppData,
         HARBOR_E2E: '1',
         HARBOR_E2E_USER_DATA: userData,
         HARBOR_NO_DAEMON_START: '1',
@@ -195,10 +275,11 @@ async function main() {
         HARBOR_NO_TITLER: '1',
         HARBOR_NO_VOICE: '1',
       },
-      stdio: 'ignore',
+      // HARBOR_DRIVE_VERBOSE=1 shows the app's own output when the launch itself fails.
+      stdio: process.env.HARBOR_DRIVE_VERBOSE === '1' ? 'inherit' : 'ignore',
     });
 
-    const pageTarget = await target(PAGE_PORT, (t) => t.type === 'page' && !t.url.startsWith('devtools:'));
+    const pageTarget = await target(PAGE_PORT, (t) => t.type === 'page' && !t.url.startsWith('devtools:'), 60000);
     page = await Cdp.open(pageTarget.webSocketDebuggerUrl);
     await page.send('Runtime.enable');
     let ready = false;
@@ -251,6 +332,41 @@ async function main() {
     check(log.some((e) => e.stage === 'ipc' && e.image), 'question under churn: renderer sends the amber badge while the other window streams');
     check(log.some((e) => e.stage === 'overlay' && e.image), 'question under churn: main sets the overlay while the other window streams');
     console.log('  attention:', JSON.stringify(await page.evaluate('window.__badgeDrive.attention()')));
+
+    // 4. A guard permission prompt drawn in the terminal, with NO header flag
+    // and no hook-lane ask: the mahjong case. Clear scenario 3 first.
+    check(await main.evaluate(dialogProbe(tmp), { cli: true }), 'terminal-dialog stand-in installed in main');
+    await page.evaluate('window.__badgeDrive.blockA(false)');
+    await sleep(1500);
+    t0 = Date.now();
+    await main.evaluate('globalThis.__dialogUp = true');
+    await sleep(2500);
+    log = await logSince(t0);
+    console.log('  terminal prompt:', JSON.stringify(log));
+    check(await page.evaluate('window.__badgeDrive.cardShown()'), 'terminal prompt: the window draws its answer card');
+    check(log.some((e) => e.stage === 'overlay' && e.image && String(e.d).startsWith('1 session waiting')), 'terminal prompt: main sets the AMBER overlay');
+
+    t0 = Date.now();
+    await main.evaluate('globalThis.__dialogUp = false');
+    await sleep(2500);
+    log = await logSince(t0);
+    console.log('  terminal prompt answered:', JSON.stringify(log));
+    check(log.some((e) => e.stage === 'overlay' && String(e.d).startsWith('0 sessions waiting')), 'terminal prompt answered: the amber overlay goes');
+
+    // 5. The same prompt while the window shows its raw terminal (>_).
+    check(await page.evaluate('window.__badgeDrive.rawTerminal()'), 'sess-a flipped to its raw terminal');
+    await sleep(1500);
+    t0 = Date.now();
+    await main.evaluate('globalThis.__dialogUp = true');
+    await sleep(2500);
+    log = await logSince(t0);
+    const calls = (await main.evaluate('globalThis.__menuCalls')).filter((c) => c.t >= t0 && c.sessionId === 'sess-a');
+    console.log(`  raw-terminal prompt (${calls.length} polls, observe on ${calls.filter((c) => c.observe).length}):`, JSON.stringify(log));
+    check(calls.length > 0 && calls.every((c) => c.observe), 'raw terminal: the window still polls, and only as an observer');
+    check(!(await page.evaluate('window.__badgeDrive.cardShown()')), 'raw terminal: no card is drawn over the terminal');
+    check(log.some((e) => e.stage === 'overlay' && e.image && String(e.d).startsWith('1 session waiting')), 'raw terminal: main sets the AMBER overlay');
+    check((await main.evaluate('globalThis.__dialogKeys')).length === 0, 'no key was ever sent to the stand-in terminal');
+    await main.evaluate('globalThis.__dialogUp = false');
   } finally {
     // The app exits mid-call and never answers, so do not wait on the reply.
     try { page?.send('Runtime.evaluate', { expression: 'window.harbor.e2e && window.harbor.e2e.quit()' }).catch(() => {}); } catch { /* exiting */ }
@@ -258,7 +374,9 @@ async function main() {
     main?.close();
     await sleep(800);
     if (child && child.exitCode === null) { try { child.kill(); } catch { /* gone */ } }
-    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+    // Verbose runs keep the isolated app's files (its lifecycle log is under cache/perf).
+    if (process.env.HARBOR_DRIVE_VERBOSE === '1') console.log(`kept ${tmp}`);
+    else try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 
   console.log(failures.length ? `\n${failures.length} FAILED` : '\nALL PASS');

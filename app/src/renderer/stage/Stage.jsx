@@ -1,5 +1,5 @@
 import { subSessionReadOnly } from '../../shared/sub-sessions.js';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SessionTile } from './SessionTile.jsx';
 import { ErrorBoundary } from '../ErrorBoundary.jsx';
 import { CommandBar } from './CommandBar.jsx';
@@ -63,6 +63,7 @@ export function Stage({
   sessionsById,
   transcripts,
   asksBySession,
+  waitingIds,
   selectedId,
   attention,
   focusedId,
@@ -124,7 +125,14 @@ export function Stage({
 
   const selected = sessionsById.get(selectedId) || null;
   const selectedPane = selected ? resolvePane(selected) : null;
-  const selectedHeader = selected ? transcripts.get(selected.id)?.header || null : null;
+  const selectedTranscriptHeader = selected ? transcripts.get(selected.id)?.header || null : null;
+  // The command bar hears "waiting on you" from the same evidence as the badge
+  // (index.jsx waitingIds); the transcript header alone never says it.
+  const selectedWaiting = Boolean(selected && waitingIds?.has(selected.id));
+  const selectedHeader = useMemo(
+    () => (selectedWaiting ? { ...selectedTranscriptHeader, blocked: true } : selectedTranscriptHeader),
+    [selectedTranscriptHeader, selectedWaiting],
+  );
   const selectedReadOnly = subSessionReadOnly(selected);
   const selectedExternalLive = selected ? isExternalLive(selected) : false;
 

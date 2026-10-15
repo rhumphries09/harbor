@@ -2,7 +2,7 @@ import { subSessionReadOnly } from '../shared/sub-sessions.js';
 import { useSidebarState } from './sidebar/store.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { replyStore } from './stage/use-question-reply.js';
-import { useModelDialogs } from './stage/use-dialog-state.js';
+import { useTerminalDialogs } from './stage/use-dialog-state.js';
 import { useCallback } from './use-callback.js';
 import { createRoot } from 'react-dom/client';
 import { Sidebar } from './sidebar/Sidebar.jsx';
@@ -436,7 +436,7 @@ function App() {
     window.harbor.asks.list().then((list) => setAsks(Array.isArray(list) ? list : [])).catch(() => {});
     return window.harbor.asks.onChanged((list) => setAsks(Array.isArray(list) ? list : []));
   }, []);
-  const modelDialogs = useModelDialogs();
+  const terminalDialogs = useTerminalDialogs();
   const asksBySession = useMemo(() => {
     const map = new Map();
     for (const ask of asks) if (ask?.sessionId && !ask.answered && !map.has(ask.sessionId)) map.set(ask.sessionId, ask);
@@ -922,7 +922,7 @@ function App() {
         background: backgroundBusy(session, header),
         // A question waiting in the hook lane is the strongest blocked signal
         // there is: Claude is inside the tool call until the form answers.
-        blocked: asksBySession.has(session.id) || modelDialogs.has(id) || (header ? Boolean(header.blocked) : session.agentStatus === 'blocked'),
+        blocked: asksBySession.has(session.id) || terminalDialogs.has(id) || (header ? Boolean(header.blocked) : session.agentStatus === 'blocked'),
         isSelected: id === selectedId,
         // Orchestration workers and BATCH TITLE children finish all day; they
         // are not waiting for Pat, and counting them pinned the badge at 9+.
@@ -934,7 +934,17 @@ function App() {
       if (state) map.set(id, state);
     }
     return { attention: map, attentionDescriptors: descriptors };
-  }, [sessionsWithSynthetic, transcripts, selectedId, seenStore, tiles, asksBySession, modelDialogs]);
+  }, [sessionsWithSynthetic, transcripts, selectedId, seenStore, tiles, asksBySession, terminalDialogs]);
+
+  // Every session waiting on you right now, from the same evidence as the
+  // badge. Voice mode, the handoff chain and the command bar read this, never
+  // the transcript header alone: the header's blocked flag is set by nothing
+  // on the session daemon, so a session at a permission prompt read as
+  // "working" to all three (2026-10-14).
+  const waitingIds = useMemo(
+    () => new Set(attentionDescriptors.filter((d) => d.blocked).map((d) => d.id)),
+    [attentionDescriptors],
+  );
 
   // Taskbar status projects the same descriptors as the rail pips, with one
   // deliberate difference (badgeCounts): blocked is a LIVE state that ignores
@@ -1116,7 +1126,7 @@ function App() {
     if (!session) return null;
     const data = transcripts.get(session.id);
     const header = data?.header || null;
-    const state = header?.blocked ? 'waiting on you'
+    const state = waitingIds.has(session.id) ? 'waiting on you'
       : header?.working ? 'working'
         : session.isLive || resolvePane(session) ? 'ready' : 'not running';
     return {
@@ -1128,7 +1138,7 @@ function App() {
       contextPct: typeof header?.contextPct === 'number' ? header.contextPct : null,
       selected: session.id === selectedId,
     };
-  }).filter(Boolean), [tiles, sessionsWithSynthetic, transcripts, resolvePane, selectedId]);
+  }).filter(Boolean), [tiles, sessionsWithSynthetic, transcripts, resolvePane, selectedId, waitingIds]);
 
   const voiceRead = useCallback(async (sessionId, limit) => {
     const blocks = transcripts.get(sessionId)?.blocks || [];
@@ -1219,10 +1229,10 @@ function App() {
   // instead of painting an error line. /pickup carries no path on purpose:
   // the pickup command itself loads the newest handoff file.
   const [handoffChains, setHandoffChains] = useState(() => new Map());
-  const chainWorldRef = useRef({ transcripts, sessions: sessionsWithSynthetic, chains: handoffChains });
+  const chainWorldRef = useRef({ transcripts, sessions: sessionsWithSynthetic, chains: handoffChains, waitingIds });
   useEffect(() => {
-    chainWorldRef.current = { transcripts, sessions: sessionsWithSynthetic, chains: handoffChains };
-  }, [transcripts, sessionsWithSynthetic, handoffChains]);
+    chainWorldRef.current = { transcripts, sessions: sessionsWithSynthetic, chains: handoffChains, waitingIds };
+  }, [transcripts, sessionsWithSynthetic, handoffChains, waitingIds]);
   const chainSendsInFlightRef = useRef(new Set());
 
   const applyChainSendResult = useCallback((sessionId, result) => {
@@ -1257,7 +1267,7 @@ function App() {
     if (!handoffChains.size) return undefined;
     const timer = setInterval(() => {
       const now = Date.now();
-      const { transcripts: snapshot, chains } = chainWorldRef.current;
+      const { transcripts: snapshot, chains, waitingIds: waiting } = chainWorldRef.current;
       const updates = new Map();
       const sends = [];
       for (const [id, chain] of chains) {
@@ -1273,7 +1283,7 @@ function App() {
         const out = chainTick(chain, {
           now,
           working: Boolean(header?.working),
-          blocked: Boolean(header?.blocked),
+          blocked: waiting.has(id),
           missing: !data,
         });
         if (out.state !== chain) {
@@ -1690,6 +1700,7 @@ function App() {
               <Stage
                 tiles={tiles}
                 asksBySession={asksBySession}
+                waitingIds={waitingIds}
                 sessionsById={sessionsWithSynthetic}
                 transcripts={transcripts}
                 selectedId={selectedId}
