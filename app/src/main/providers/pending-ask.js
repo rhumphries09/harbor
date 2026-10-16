@@ -70,6 +70,11 @@ function createPendingAskReader(options = {}) {
       if (!isAsk && !isResult) continue;
       let obj = null;
       try { obj = JSON.parse(line); } catch { continue; }
+      // Only conversation records count. Claude Code 2.1.300 also stores
+      // copies of each API request (`api-request-blob`) whose messages carry the
+      // same tool_use and tool_result parts; a copy is neither a question nor
+      // an answer (2026-10-15).
+      if (obj?.type && obj.type !== 'assistant' && obj.type !== 'user') continue;
       const content = obj?.message?.content;
       if (!Array.isArray(content)) continue;
       for (const part of content) {

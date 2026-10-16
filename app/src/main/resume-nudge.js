@@ -10,7 +10,11 @@ function planResumeNudge(tailRecords) {
   const records = Array.isArray(tailRecords) ? tailRecords : [];
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index];
-    const role = record?.message?.role || record?.type;
+    // The record's TYPE says whether it is a turn. Claude Code 2.1.300 also
+    // writes `api-request-blob` copies of each request carrying ordinary
+    // user/assistant message objects; a copy is never a turn (2026-10-15).
+    // The role decides only for a record that names no type at all.
+    const role = record?.type ? record.type : record?.message?.role;
     if (role !== 'user' && role !== 'assistant') continue;
     if (role === 'assistant') return { kind: 'nudge' };
 

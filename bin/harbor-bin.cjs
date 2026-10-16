@@ -630,6 +630,11 @@ function codexMigrationAcks(codexHome, version = null) {
 function codexPaneControls({ version, codexHome }) {
   const controls = [];
   if (semverAtLeast(version, CODEX_PANE_CONTROLS_SINCE)) controls.push('--no-daemon', '-c', 'tui.fullscreen_transcript=false');
+  // 0.163 enables Daybreak controls by default. A cyber-policy refusal can
+  // open an enable picker that drops pasted text and takes our Enter instead.
+  // Preserve the previous pane behavior on both launch and resume, without
+  // changing the home's saved preference or the separate exec worker path.
+  if (semverAtLeast(version, [0, 163, 0])) controls.push('-c', 'features.cli_daybreak=false');
   const acks = codexHome ? codexMigrationAcks(codexHome, version) : null;
   if (acks) controls.push('-c', acks);
   return controls;

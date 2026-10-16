@@ -55,6 +55,23 @@ const argv = (args, extraEnv = {}) => execFileSync(process.execPath, [AI, ...arg
 // (`providers.claude.bin`, `HARBOR_CLAUDE_BIN`) and defaults to `claude`.
 const CLAUDE = 'claude --dangerously-skip-permissions';
 
+test('codex 0.163 panes disable the new default Daybreak picker on launch and resume', () => {
+  for (const args of [
+    ['--provider', 'codex', 'hello'],
+    ['--provider', 'codex', '--resume-id', 'synthetic-session', 'hello'],
+  ]) {
+    for (const version of ['0.163.0', '0.164.0']) {
+      const command = argv(args, { HARBOR_CODEX_VERSION: version });
+      assert.match(command, /-c features\.cli_daybreak=false/);
+      assert.ok(command.indexOf('features.cli_daybreak=false') < command.lastIndexOf('hello'));
+      assert.match(command, /--no-daemon/);
+    }
+    for (const version of ['0.162.1', 'unreadable']) {
+      assert.doesNotMatch(argv(args, { HARBOR_CODEX_VERSION: version }), /cli_daybreak/);
+    }
+  }
+});
+
 test('the CLI selector defaults to sessiond and names the retired backend clearly', () => {
   assert.equal(argv([], { HARBOR_SESSION_BACKEND: '' }), CLAUDE);
   assert.equal(argv([], { HARBOR_SESSION_BACKEND: 'sessiond' }), CLAUDE);
@@ -215,7 +232,9 @@ test('codex >= 0.156.0 panes run without the shared server and keep the inline t
   const pinned = '--no-daemon -c tui.fullscreen_transcript=false';
   const bundledAcks = " -c 'notice.model_migrations={'\\''gpt-5.4-mini'\\''='\\''gpt-6-luna'\\'','\\''gpt-5.4'\\''='\\''gpt-6-sol'\\''}'";
   for (const [version, migrations] of [
-    ['0.156.0', ''], ['0.157.0', ''], ['0.158.0', bundledAcks], ['1.0.0', bundledAcks],
+    ['0.156.0', ''], ['0.157.0', ''], ['0.158.0', bundledAcks],
+    ['0.163.0', ' -c features.cli_daybreak=false' + bundledAcks],
+    ['1.0.0', ' -c features.cli_daybreak=false' + bundledAcks],
   ]) {
     assert.equal(
       argv(['--provider', 'codex', '--model', 'gpt-6-sol', '--effort', 'high'], { HARBOR_CODEX_VERSION: version }),

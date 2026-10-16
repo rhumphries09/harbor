@@ -159,6 +159,21 @@ function checkerFor(fixture, extra = {}) {
   });
 }
 
+test('codex notes flag input routing, Daybreak, persistent hints and shell notices', () => {
+  const cases = [
+    ['Daybreak is enabled by default for eligible accounts.', 'daybreak'],
+    ['Send a follow-up while Codex is responding to steer it immediately.', 'composer'],
+    ['Interrupting a turn also stops active Code Mode cells.', 'composer'],
+    ['Configure a leader key in /keymap. Shortcut hints stay open until you choose or cancel.', 'visibility'],
+    ['On Windows, Ctrl+V and Shift+Insert paste text as well as images.', 'composer'],
+    ['Configurations using the retired shell flags receive a migration notice.', 'startup-screen'],
+    ['Resuming a saved thread restores its permissions and network approvals.', 'resume'],
+  ];
+  const missing = cases.filter(([line, id]) => !tagLine('codex', line).flags.some(flag => flag.id === id));
+  assert.deepEqual(missing, [], 'each input and startup contact must carry its own reason');
+  assert.ok(!tagLine('codex', 'Reduced release package size by stripping symbols.').flags.some(flag => ['composer', 'daybreak', 'startup-screen', 'visibility'].includes(flag.id)));
+});
+
 test('first state reconciles stale disk truth before any reply or push, without network', async (t) => {
   const fixture = await makeHome();
   t.after(() => fsp.rm(fixture.root, { recursive: true, force: true }));
@@ -514,6 +529,30 @@ test('bypass permissions mode and left-arrow background lines carry a flag', () 
   assert.equal(ids('Fixed `/model` effort ←/→ wrapping past the highest or lowest level, which could accidentally save Low as a model\'s default effort').includes('composer'), false);
   // A permission line that is not about the bypass mode stays off that flag.
   assert.equal(ids('Windows: Fixed PowerShell commands longer than about 1 KB always asking for permission, so allow rules and read-only detection now apply up to 32 KB').includes('bypass-mode'), false);
+  assert.deepEqual(ids('Fixed `/add-dir` path box letting Shift+Enter or a paste add a line break'), []);
+});
+
+// The 2026-10-15 review (claude 2.1.296 to 2.1.301, all three installed by the
+// CLI's own updater, so the chip never showed them) found four lines with no
+// flag: idle compaction, which summarizes an idle 200K+ conversation with no
+// one asking; a model switch that now summarizes first; a note about plan mode
+// under bypass permissions; and fewer rm permission prompts. Verbatim.
+test('idle compaction, model switch, bypass permissions and rm prompt lines carry a flag', () => {
+  const ids = (line) => tagLine('claude', line).flags.map((f) => f.id);
+  const compaction = [
+    'Added idle compaction in the terminal: a 200K+ token conversation left idle for about 54 minutes is compacted before its one-hour prompt cache expires, so your next message doesn\'t reprocess it all',
+    'Fullscreen mode: Fixed `/compact` and auto-compact briefly freezing the UI while the visible transcript is rebuilt',
+  ];
+  for (const line of compaction) assert.ok(ids(line).includes('compaction'), line);
+  assert.equal(tagLine('claude', compaction[0]).flags.find((f) => f.id === 'compaction').verify, 'npm test -- transcript');
+  assert.ok(ids('Improved switching to a model with a smaller context window: a conversation too long for the new model is now summarized by the previous model first').includes('model'));
+  assert.ok(ids('Added a one-time note when plan mode won\'t ask before most edits or commands because bypass permissions is available').includes('bypass-mode'));
+  assert.ok(ids('Fixed rm prompts on shell `-c` scripts that don\'t run `rm`. An rm built at run time in a script Claude Code can\'t read no longer prompts unless `CLAUDE_CODE_STRICT_INLINE_SHELL_RM_PROMPT=1`').includes('ask-dialog'));
+  // Narrow on purpose: a compact view or layout is not a compaction, and a
+  // model's own context window size is not a switch.
+  assert.equal(ids('Improved the compact layout of the agents list on narrow terminals').includes('compaction'), false);
+  assert.equal(ids('Fixed `claude mcp list` showing a compact table for servers with long names').includes('compaction'), false);
+  assert.equal(ids('Fixed a model\'s context window being shown as 200K in `/context`').includes('model'), false);
   assert.deepEqual(ids('Fixed `/add-dir` path box letting Shift+Enter or a paste add a line break'), []);
 });
 

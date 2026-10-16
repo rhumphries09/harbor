@@ -117,7 +117,9 @@ const IMPACT_FLAGS = {
   claude: [
     {
       id: 'ask-dialog',
-      re: /AskUserQuestion|permission prompt|permission dialog|\bdialog\b|approval prompt/i,
+      // `rm prompts` (2026-10-15, 2.1.299): the CLI's rm check is a permission
+      // prompt with no "permission" in the changelog line.
+      re: /AskUserQuestion|permission prompt|permission dialog|\bdialog\b|approval prompt|\brm prompts?\b/i,
       why: 'Harbor answers AskUserQuestion, permission and resume dialogs by WALKING THE PTY SCREEN, not the transcript. A change to how a dialog is drawn breaks the ask sheet.',
       verify: 'node scripts/drive-ask-sheet-win.js',
     },
@@ -160,6 +162,15 @@ const IMPACT_FLAGS = {
       why: 'The history index, the transcript parser, resume and the minted --session-id all read ~/.claude/projects. A transcript or session-id change is felt by every rail row and every conversation window.',
       verify: 'npm test -- transcript',
     },
+    // 2026-10-15 (2.1.299): "Added idle compaction in the terminal: a 200K+
+    // token conversation left idle for about 54 minutes is compacted" matched
+    // nothing. A bare adjective "compact" (a compact layout) is not a compaction.
+    {
+      id: 'compaction',
+      re: /\bcompact(?:ion|ions|ed|ing)\b|auto-?compact|\/compact\b/i,
+      why: 'A compaction replaces the session\'s earlier context with a summary. The window draws a compaction note from the transcript, a send is refused while compaction is on screen, and the handoff chain drives /compact. A new trigger changes what an idle session holds when its user comes back.',
+      verify: 'npm test -- transcript',
+    },
     {
       id: 'statusline',
       re: /status ?line/i,
@@ -190,7 +201,10 @@ const IMPACT_FLAGS = {
       // A family name with a version (2026-10-07): "Added Claude Haiku 5.5
       // (`claude-haiku-5-5`)" matched nothing here, and a new model is the
       // line that most needs the seed, the menus and the worker recipes.
-      re: /\/model\b|model id|model picker|\beffort\b|--effort|\bclaude-(?:opus|sonnet|haiku|fable|mythos)-\d|\b(?:Opus|Sonnet|Haiku|Fable|Mythos) \d+(?:\.\d+)?\b/i,
+      // 2026-10-15 (2.1.301): "switching to a model with a smaller context
+      // window ... summarized by the previous model first" matched nothing, and
+      // the capability menu's model choice is exactly such a switch.
+      re: /\/model\b|model id|model picker|\beffort\b|--effort|\bclaude-(?:opus|sonnet|haiku|fable|mythos)-\d|\b(?:Opus|Sonnet|Haiku|Fable|Mythos) \d+(?:\.\d+)?\b|\bswitch(?:es|ed|ing)? (?:to )?(?:a |the |another )?(?:different )?models?\b/i,
       why: 'model-catalog.js scans the installed binary for launchable ids and bin/ai forwards --effort at launch. A renamed id or dropped flag empties the capability menu.',
       verify: 'npm test -- model-catalog',
     },
@@ -201,8 +215,12 @@ const IMPACT_FLAGS = {
       // backup" matched nothing, and it is the file the out-of-band install chain
       // exists to replace.
       re: /auto ?-? ?update|installMethod|install method|self-?update|claude\.exe/i,
-      why: 'Harbor deliberately keeps autoUpdates FALSE and installMethod "global". The update chip can replace Claude while existing sessions keep their loaded version until resumed. Changes to self-updating or executable replacement need verification.',
-      verify: 'node -e "console.log(require(process.env.USERPROFILE+\'/.claude.json\').autoUpdates)"',
+      // 2026-10-15: the per-home `autoUpdates: false` in .claude.json is a legacy
+      // key the CLI migrates into settings env as DISABLE_AUTOUPDATER, and a
+      // config home created later never had it, so its sessions installed three
+      // releases unreviewed. The env in settings.json is the switch that holds.
+      why: 'The CLI\'s own background updater must stay off (DISABLE_AUTOUPDATER=1 in every config home\'s settings env) so only a reviewed version is installed, through the update chip, which can replace Claude while existing sessions keep their loaded version until resumed. Changes to self-updating or executable replacement need verification.',
+      verify: 'node -e "console.log(require(process.env.USERPROFILE+\'/.claude/settings.json\').env?.DISABLE_AUTOUPDATER)"',
     },
     {
       id: 'mcp',
@@ -215,9 +233,11 @@ const IMPACT_FLAGS = {
     // flag, yet it is a NEW dialog in the exact mode every Harbor launch uses.
     // 2026-10-09 (2.1.296): "`rm -rf ...` ... not asking in bypass permissions
     // mode" matched nothing either; the changelog spells the mode with a space.
+    // 2026-10-15 (2.1.299): "because bypass permissions is available" has no
+    // "mode" after it, so the name alone counts.
     {
       id: 'bypass-mode',
-      re: /dangerously-skip-permissions|bypass[ _-]?(?:permissions)? mode|permission mode|defaultMode/i,
+      re: /dangerously-skip-permissions|bypass[ _-]?permissions?\b|bypass mode|permission mode|defaultMode/i,
       why: 'Harbor launches every claude session with --dangerously-skip-permissions. A prompt that appears in that mode is a dialog the ask card must surface, and a mode change alters what every pane does unattended.',
       verify: 'node scripts/drive-ask-sheet-win.js',
     },
@@ -276,7 +296,7 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'resume',
-      re: /\bresume\b|\bfork\b|--output-last-message|\bexec\b/i,
+      re: /\bresum(?:e|ed|es|ing)\b|\bfork\b|--output-last-message|\bexec\b/i,
       why: 'bin/ai composes "codex resume ... <id>" for dead sessions and orchestration workers launch through codex exec.',
       verify: 'npm test -- providers',
     },
@@ -302,7 +322,7 @@ const IMPACT_FLAGS = {
       id: 'visibility',
       // "Enabled fullscreen transcripts by default" (0.157.0) matched nothing
       // here, and it moved the whole pane onto the alternate screen.
-      re: /visibilit|\bTUI\b|alternate screen|alt[- ]screen|full-?screen|scrollback|repaint|redraw/i,
+      re: /visibilit|\bTUI\b|alternate screen|alt[- ]screen|full-?screen|scrollback|repaint|redraw|leader key|shortcut hints|\/keymap\b/i,
       why: 'The codex pane is read through the same pty screen model as claude; a TUI rewrite changes what Harbor sees. bin/ai pins tui.fullscreen_transcript=false so panes keep the inline transcript Harbor was proven against.',
       verify: 'npm test -- screen',
     },
@@ -317,9 +337,21 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'startup-screen',
-      re: /migration prompt|model migration|startup (prompt|screen|dialog)|onboarding|\brecovery (choice|prompt)s?\b|\bmodal\b/i,
+      re: /migration (prompt|notice)|model migration|startup (prompt|screen|dialog)|onboarding|\brecovery (choice|prompt)s?\b|\bmodal\b/i,
       why: 'Harbor types into a codex pane once its screen settles. A startup screen that takes Enter eats that message: the model-migration screen also writes model = ... into config.toml. bin/ai acknowledges every migration models_cache.json lists; a new startup screen needs the same treatment.',
       verify: 'npm test -- ai-launch-argv',
+    },
+    {
+      id: 'daybreak',
+      re: /\bDaybreak\b|cyber[- ](?:policy|access)/i,
+      why: 'Daybreak can open an enable picker after a cyber-policy refusal. Harbor sends pasted text followed by Enter, so launches and resumes pin its CLI controls off from 0.163.0.',
+      verify: 'npm test -- ai-launch-argv',
+    },
+    {
+      id: 'composer',
+      re: /\bsteer(?:s|ed|ing)?\b|follow-up.*responding|\binterrupt(?:s|ed|ing)?\b|\bpast(?:e|es|ed|ing)\b|Ctrl\+V|Shift\+Insert/i,
+      why: 'Harbor sends Codex text through bracketed paste then Enter, including during a working turn. Input routing, paste and interrupt changes can alter what that send does.',
+      verify: 'npm test -- session-send',
     },
   ],
   cursor: [

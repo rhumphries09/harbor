@@ -140,3 +140,23 @@ test('a question with no options at all is not a card', () => {
   const file = writeTranscript([assistantAsk('toolu_empty', [{ question: '', options: [] }])]);
   assert.equal(createPendingAskReader().read(file), null);
 });
+
+// Claude Code 2.1.300 also writes copies of each API request into the
+// transcript as `api-request-blob` records with ordinary message objects. A
+// copy is not the conversation: an AskUserQuestion inside one is never the live
+// question, and only the real records decide which question is still open
+// (2026-10-15 CLI review).
+test('a stored request copy of a question is never the live one', () => {
+  const blob = (role, content) => ({ type: 'api-request-blob', hash: `h-${role}`, message: { role, content } });
+  const copyOnly = writeTranscript([
+    { type: 'user', message: { role: 'user', content: 'hello' } },
+    blob('assistant', [{ type: 'tool_use', id: 'toolu_copy', name: 'AskUserQuestion', input: { questions: QUESTIONS } }]),
+  ]);
+  assert.equal(createPendingAskReader().read(copyOnly), null);
+  const realAfterCopy = writeTranscript([
+    blob('assistant', [{ type: 'tool_use', id: 'toolu_copy', name: 'AskUserQuestion', input: { questions: QUESTIONS } }]),
+    assistantAsk('toolu_live', QUESTIONS),
+    blob('user', [{ type: 'tool_result', tool_use_id: 'toolu_live', content: 'a copy of an answer is not an answer' }]),
+  ]);
+  assert.equal(createPendingAskReader().read(realAfterCopy)?.toolId, 'toolu_live');
+});

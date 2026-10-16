@@ -40,6 +40,27 @@ test('a long typed message is redelivered without truncation', () => {
   assert.deepEqual(planResumeNudge([typed([{ type: 'text', text }])]), { kind: 'redeliver', text });
 });
 
+// Claude Code 2.1.300 writes a copy of each API request into the transcript
+// (`api-request`, plus `api-request-blob` records carrying message objects
+// whose role is user, assistant or system). A copy is not a conversation turn:
+// a stored assistant message must not read as a reply, and a stored user one
+// must not hide the typed message it copies (2026-10-15 CLI review).
+test('a stored request copy is not a conversation turn', () => {
+  const text = 'Typed just before the session died.';
+  const blob = (role, content) => ({ type: 'api-request-blob', hash: `h-${role}`, message: { role, content } });
+  assert.deepEqual(planResumeNudge([
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Earlier answer' }] } },
+    typed(text),
+    blob('user', [{ type: 'text', text }]),
+    blob('system', 'Output style reminder'),
+    { type: 'api-request', id: 'req-1', querySource: 'repl_main_thread' },
+  ]), { kind: 'redeliver', text });
+  assert.deepEqual(planResumeNudge([
+    typed(text),
+    blob('assistant', [{ type: 'text', text: 'A reply that was only ever sent, never received' }]),
+  ]), { kind: 'redeliver', text });
+});
+
 test('an image-bearing message refuses honestly instead of sending a nudge', () => {
   assert.deepEqual(planResumeNudge([typed([
     { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abc' } },
