@@ -556,6 +556,35 @@ test('idle compaction, model switch, bypass permissions and rm prompt lines carr
   assert.deepEqual(ids('Fixed `/add-dir` path box letting Shift+Enter or a paste add a line break'), []);
 });
 
+// The 2026-10-18 review (claude 2.1.302 and 2.1.303) found three lines with no
+// flag: the agents view (where session-send refuses to type), the footer hint
+// that opens it, and URLs that now stay one hyperlink across wrapped rows,
+// which the headless screen has to parse. Verbatim.
+test('agents view, its footer hint and wrapped hyperlink lines carry a flag', () => {
+  const ids = (line) => tagLine('claude', line).flags.map((f) => f.id);
+  const agentsView = [
+    'Changed the `← for agents` footer hint to hide 10 seconds after a session opens; the count of agents waiting on you still shows',
+    'Fixed rows in the agents view staying blank after moving down a long list or folding a section',
+    'Fixed the agents view taking a typed word such as "up", "down" or "escape" for that key when input arrived in a burst, which could move the peek mid-reply or clear a draft',
+    // The changelog also says it in the singular, and names the view's input.
+    'Fixed sessions dispatched from an agent view opened with `←` always starting in the original session\'s permission mode',
+    'Fixed typed or pasted text occasionally coming out scrambled in the `claude agents` dispatch input during key repeat or very fast input',
+  ];
+  for (const line of agentsView) assert.ok(ids(line).includes('agents-view'), line);
+  assert.equal(tagLine('claude', agentsView[0]).flags.find((f) => f.id === 'agents-view').verify, 'npm test -- session-send');
+  const links = [
+    'Fixed URLs written in backticks being clickable only on their first row when they wrap; the whole URL is now one link in terminals that support hyperlinks',
+    'Fixed a link address shown as text being hidden by a colour or conceal style a reply left on, including where it wraps in a table or a question preview',
+  ];
+  for (const link of links) assert.ok(ids(link).includes('screen'), link);
+  assert.equal(ids('[Claude Tag] Fixed links in Claude\'s Slack replies breaking where a row of a table wraps').includes('screen'), false);
+  // A hyperlink line with no row or wrap in it stays off: the 2.1.295 "raw
+  // terminal hyperlink bytes" case is pinned in the background-task spec above.
+  // Narrow on purpose: a VSCode footer pill or a subagent is not the agents view.
+  assert.equal(ids('[VSCode] Fixed the footer\'s model pill and Remote Control pill waiting for the new tab\'s Claude process to start').includes('agents-view'), false);
+  assert.equal(ids('Changed fork subagents (`subagent_type: "fork"`) to be on by default in the desktop app').includes('agents-view'), false);
+});
+
 test('check reads installed versions off disk and latest off the network, per provider', async () => {
   const fixture = await makeHome();
   const checker = checkerFor(fixture);

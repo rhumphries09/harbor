@@ -52,7 +52,7 @@ function cursorFixture(root, usedPct) {
   return file;
 }
 
-test('unset setting: Balanced, and a capped seat keeps large general jobs on Claude', (t) => {
+test('unset setting: Balanced, which keeps general work on Claude', (t) => {
   const root = home(t, { '.codex': 100, '.codex-work': 62, '.codex-pro': 41 });
   const r = run(root, { HARBOR_PROVIDER_LEAN_FILE: path.join(root, 'missing.json') });
   assert.equal(r.status, 0, r.stderr);
@@ -61,11 +61,25 @@ test('unset setting: Balanced, and a capped seat keeps large general jobs on Cla
   assert.match(lines[1], /^GPT seats this week: /);
   for (const part of ['Default 100% (capped)', 'Work 62%', 'Pro 41%']) assert.ok(lines[1].includes(part), part);
   assert.equal(lines[2], 'Cursor this month: unknown (Online usage checks are disabled.)');
-  assert.equal(lines[3], "Verdict: Image work: Pro (41% used this week). Simple mechanical work: Claude (Cursor's usage could not be read). Large general jobs: Claude (Default is capped). Everything else: Claude.");
+  assert.equal(lines[3], "Verdict: Image work: Pro (41% used this week). Simple mechanical work: Claude (Cursor's usage could not be read). Everything else: Claude.");
   assert.equal(lines[4], 'Routing right now:');
   assert.match(r.stdout, /Image work \([^)]*\): GPT seat Pro, CODEX_HOME .*\.codex-pro/);
   assert.match(r.stdout, /Reviewing worker output \([^)]*\): Claude \(A different model catches mistakes the author misses\)/);
-  assert.match(r.stdout, /Everything else \(coding, writing, planning, research, data work\): Claude \(Small and medium general work stays on Claude\)/);
+  assert.match(r.stdout, /Everything else \(coding, writing, planning, research, data work\): Claude \(Balanced keeps general work on Claude, where it is best done\)/);
+});
+
+// 2026-10-18: a Harbor CLI review went to an Astra run because harbor-lean
+// answered "GPT seat" for `--task general --large` under Balanced with a roomy
+// seat. Pat: under Balanced, "pretty much all else goes to claude".
+test('Balanced keeps a large general job on Claude even with a nearly empty GPT seat', (t) => {
+  const root = home(t, { '.codex-work': 3 });
+  const file = path.join(root, 'lean.json');
+  fs.writeFileSync(file, JSON.stringify({ mode: 'balanced', updatedAt: new Date().toISOString() }));
+  const r = run(root, { HARBOR_PROVIDER_LEAN_FILE: file }, ['--task', 'general', '--large']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), 'general (large): Claude (Balanced keeps general work on Claude, where it is best done)');
+  const image = run(root, { HARBOR_PROVIDER_LEAN_FILE: file }, ['--task', 'image']);
+  assert.match(image.stdout, /^image: GPT seat /);
 });
 
 test('mechanical work goes to Cursor while its month has room (Pat, 2026-10-05)', (t) => {

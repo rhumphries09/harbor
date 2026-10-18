@@ -192,7 +192,16 @@ const IMPACT_FLAGS = {
       // Protocol (OSC 7501)", a query written into every pane at startup), tab
       // stops and bidirectional text "drawing over nearby rows" all matched
       // nothing; the last is the same overdraw class as the emoji width bug.
-      re: /emoji|wrap(ped|ping)? line|word wrap|alternate screen|\bANSI\b|\bcolumns?\b|repaint|redraw|terminal (width|size|render)|^(?=.*\b(?:terminal|fullscreen|pty)\b).*(?:resiz(?:e|ed|es|ing)\b|\bblank\b)|\bOSC ?\d+\b|\btab stops?\b|\bbidirectional\b/i,
+      // 2026-10-18 (2.1.302): "the whole URL is now one link in terminals that
+      // support hyperlinks" matched nothing, and an OSC 8 link spanning wrapped
+      // rows is escape bytes the headless screen must parse without leaking.
+      // Anchored to a row or wrap word on the same line, like resize above: a
+      // hyperlink line about a reply's content (2.1.295 "raw terminal hyperlink
+      // bytes ... drawn as a clickable link") is not a screen-geometry line, and
+      // a bracketed [VSCode] or [Claude Tag] line is not this terminal. Measured
+      // over 2.1.250 to 2.1.303: 4 lines, including 2.1.295's "link address ...
+      // where it wraps in a table or a question preview".
+      re: /emoji|wrap(ped|ping)? line|word wrap|alternate screen|\bANSI\b|\bcolumns?\b|repaint|redraw|terminal (width|size|render)|^(?=.*\b(?:terminal|fullscreen|pty)\b).*(?:resiz(?:e|ed|es|ing)\b|\bblank\b)|\bOSC ?\d+\b|\btab stops?\b|\bbidirectional\b|^(?!\[)(?=.*\b(?:hyperlinks?|links?|URLs?)\b)(?=.*\b(?:rows?|wrap(?:s|ped|ping)?)\b)/i,
       why: 'The daemon models the pty SCREEN. Width, emoji width and alternate-screen changes desync that model, which is exactly what broke the ask card on 2026-09-03.',
       verify: 'node scripts/drive-ask-sheet-win.js',
     },
@@ -257,6 +266,17 @@ const IMPACT_FLAGS = {
       re: /queued messages?|messages? queued|bracketed paste|send now|type-?ahead|keys typed|pasted text|\bpastes\b|as typed|typed text|\bbackgrounding\b|`←`/i,
       why: 'session-send confirms a delivery by reading the composer box and the echo above it, and sends every message as a bracketed paste plus Enter. A change to either is felt by every send.',
       verify: 'node_modules/electron/dist/electron.exe scripts/drive-resume-hooks-win.js',
+    },
+    // 2026-10-18 (2.1.302): "the `← for agents` footer hint ... hide 10 seconds
+    // after a session opens" and "rows in the agents view staying blank"
+    // matched nothing. Measured over 2.1.250 to 2.1.303: "agent(s) view" and
+    // "dispatch input" hit 21 lines, every one about this terminal view; a bare
+    // "footer" hits 26, most of them VSCode and Slack, so it is not used.
+    {
+      id: 'agents-view',
+      re: /\bagents? view\b|\bsessions view\b|← for agents|\bdispatch input\b/i,
+      why: '`←` at an empty prompt opens Claude\'s agents view, whose input creates a NEW background session. session-send refuses to type there: isFleetView recognizes the view by its own input box ("describe a task for a new session") and key hints. A change to that box or its hints can make the refusal miss and a send create a session. The specs replay captured screens, so a changed view needs a fresh capture too.',
+      verify: 'npm test -- session-send',
     },
     // 2026-10-07 (2.1.292): "Changed usage limit messages to write claude.ai
     // settings links with https://" matched nothing, and model-switch.js reads

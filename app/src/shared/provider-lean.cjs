@@ -33,6 +33,13 @@
 // security, concurrency), cross interacting modules, or have no simple check is
 // `complex`, and routes as general work instead.
 //
+// Balanced keeps general work on Claude, large or not (Pat, 2026-10-18: "work
+// should go where it is best done (visual / image stuff goes to gpt, pretty
+// much all else goes to claude)"). From 2026-10-05 it had sent a large general
+// job to a GPT seat whenever one sat under 50%; Pat called that rule temporary,
+// and it is gone. So under Balanced only the better-side kinds cross over:
+// images to a GPT seat, simple mechanical work to Cursor.
+//
 // Pure on purpose: the renderer imports this file, so no fs here. The file
 // itself is read and written by main/providers/provider-lean.js.
 
@@ -50,7 +57,7 @@ const LEAN_MODES = Object.freeze([
   Object.freeze({
     id: 'balanced',
     label: 'Balanced',
-    detail: 'Each task goes where it does best. Large general jobs go to a GPT seat with room.',
+    detail: 'Each task goes where it is best done: images to a GPT seat, mechanical work to Cursor, everything else on Claude.',
   }),
   Object.freeze({
     id: 'lean-openai',
@@ -93,7 +100,6 @@ const TASK_KINDS = Object.freeze([
 ]);
 
 const DEFAULT_LEAN = 'balanced';
-const BALANCED_MAX_PCT = 50;
 const GPT_MAX_PCT = 90;
 const CURSOR_MAX_PCT = 90;
 
@@ -128,9 +134,8 @@ function seatFacts(seats) {
   const known = (Array.isArray(seats) ? seats : []).filter((seat) => seat && finitePct(seat.weeklyPct));
   const byPct = (a, b) => a.weeklyPct - b.weeklyPct;
   const best = known.slice().sort(byPct)[0] || null;
-  const capped = known.filter((seat) => seat.weeklyPct >= 100 && !hasReset(seat));
   const spare = known.filter(hasReset).sort(byPct)[0] || null;
-  return { best, capped, spare, open: best && best.weeklyPct < GPT_MAX_PCT ? best : null };
+  return { best, spare, open: best && best.weeklyPct < GPT_MAX_PCT ? best : null };
 }
 
 function spareReason(seat) {
@@ -141,13 +146,14 @@ function spareReason(seat) {
 // One task's route. seats: [{ label, weeklyPct }] for the codex homes; cursor:
 // { label, monthlyPct } or null. Unknown usage never qualifies, so missing data
 // always lands on Claude (or, for mechanical work, on the general rule).
-// `large` matters only for general work under Balanced. `complex` takes
-// mechanical work off Cursor: it routes as general work, with the reason.
+// `large` is still accepted from older callers (bin/harbor-lean --large) but no
+// setting reads it since 2026-10-18. `complex` takes mechanical work off
+// Cursor: it routes as general work, with the reason.
 // Returns { side: 'claude' | 'gpt' | 'cursor', seat, kind, reason }.
 function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex = false } = {}) {
   const id = normalizeLean(mode);
   const kind = taskKind(kindId);
-  const { best, capped, open, spare } = seatFacts(seats);
+  const { best, open, spare } = seatFacts(seats);
   const claude = (reason) => ({ side: 'claude', seat: null, kind: kind.id, reason });
   const gpt = (seat, reason) => ({ side: 'gpt', seat, kind: kind.id, reason });
   if (id === 'claude-only') return claude('Heavy lifting is Claude only.');
@@ -172,13 +178,7 @@ function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex 
     return claude(best ? `Every GPT seat is at least ${GPT_MAX_PCT}% used.` : 'No GPT seat usage is known.');
   }
   if (id === 'lean-claude') return claude('Heavy lifting leans Claude.');
-  // Balanced, general work.
-  if (!large) return claude('Small and medium general work stays on Claude.');
-  if (!best) return claude('No GPT seat usage is known.');
-  if (capped.length) return claude(`${capped.map((seat) => seat.label).join(', ')} ${capped.length === 1 ? 'is' : 'are'} capped.`);
-  if (best.weeklyPct < BALANCED_MAX_PCT) return gpt(best, 'Large general jobs may use a GPT seat with room.');
-  if (spare) return gpt(spare, spareReason(spare));
-  return claude(`Every GPT seat is at least ${BALANCED_MAX_PCT}% used.`);
+  return claude('Balanced keeps general work on Claude, where it is best done.');
 }
 
 // Where a route lands, as a row: { label, target, note }.
@@ -193,8 +193,8 @@ function routeRow(label, route) {
 
 // The whole setting at a glance, for the menu's "Right now" rows and
 // bin/harbor-lean: { rows: [{ label, target, note }], summary, gpt, seat }.
-// gpt is 'off' (nothing goes to a GPT seat), 'image' (only image work does),
-// 'large' (plus large general jobs) or 'prefer' (most work).
+// gpt is 'off' (nothing goes to a GPT seat), 'image' (only image work does)
+// or 'prefer' (most work).
 function leanVerdict(mode, seats, cursor = null) {
   const id = normalizeLean(mode);
   const rows = [];
@@ -213,15 +213,7 @@ function leanVerdict(mode, seats, cursor = null) {
     }
     const mechanical = leanRoute(id, 'mechanical', seats, { cursor });
     rows.push(mechanical.side === 'cursor' ? routeRow('Simple mechanical work', mechanical) : { ...routeRow('Simple mechanical work', mechanical), note: why(mechanical) });
-    if (id === 'balanced') {
-      const large = leanRoute(id, 'general', seats, { large: true });
-      rows.push({ ...routeRow('Large general jobs', large), note: large.side === 'gpt' ? routeRow('', large).note : large.reason.replace(/\.$/, '') });
-      if (large.side === 'gpt') {
-        gpt = 'large';
-        seat = large.seat;
-      }
-      rows.push({ label: 'Everything else', target: 'Claude', note: null });
-    } else if (id === 'lean-openai') {
+    if (id === 'lean-openai') {
       rows.push({ label: 'Connected work and reviews', target: 'Claude', note: null });
       const general = leanRoute(id, 'general', seats);
       rows.push(routeRow('Everything else', general));
@@ -269,7 +261,6 @@ module.exports = {
   LEAN_MODES,
   TASK_KINDS,
   DEFAULT_LEAN,
-  BALANCED_MAX_PCT,
   GPT_MAX_PCT,
   CURSOR_MAX_PCT,
   normalizeLean,

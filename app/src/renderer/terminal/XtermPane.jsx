@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { xtermScrollbackOptions } from './scrollback.js';
 import steadyCursor from './steady-cursor.cjs';
+import terminalLinks from './terminal-links.cjs';
 
 // Opaque near-black ground (terminal text over the lighthouse photo would be
 // unreadable), beam-cyan cursor, and a full muted ANSI palette: xterm's
@@ -89,6 +90,9 @@ export function XtermPane({
       cursorBlink: false,
       allowProposedApi: true,
       allowTransparency: true,
+      // A click on an OSC 8 link opens it in the browser instead of xterm's
+      // confirm() and blank window, which main denies (terminal-links.cjs).
+      linkHandler: terminalLinks.terminalLinkHandler((...args) => window.open(...args)),
     });
     steadyCursor.holdCursorSteady(term);
     const fit = new FitAddon();

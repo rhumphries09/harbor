@@ -64,15 +64,20 @@ test('Lean OpenAI sends general work, writing included, to GPT but keeps Claude-
   assert.equal(leanRoute('lean-openai', 'review', ROOMY).reason, 'A different model catches mistakes the author misses.');
 });
 
-test('Balanced routes the better-side kinds both ways and large general jobs only with real headroom', () => {
+// Pat, 2026-10-18: Balanced means "work should go where it is best done (visual
+// / image stuff goes to gpt, pretty much all else goes to claude)". The
+// 2026-10-05 rule that sent large general jobs to a GPT seat with room was
+// temporary, and it is gone: a roomy seat no longer pulls general work off Claude.
+test('Balanced sends each kind where it is best done and keeps general work on Claude, large or not', () => {
   assert.equal(leanRoute('balanced', 'image', TODAY).side, 'gpt');
   assert.equal(leanRoute('balanced', 'connected', ROOMY).side, 'claude');
-  assert.equal(leanRoute('balanced', 'general', ROOMY).side, 'claude', 'small general work stays home');
-  const large = leanRoute('balanced', 'general', ROOMY, { large: true });
-  assert.equal(large.side, 'gpt');
-  assert.equal(large.seat.label, 'Pro');
-  assert.equal(leanRoute('balanced', 'general', TODAY, { large: true }).reason, 'Default is capped.');
-  assert.equal(leanRoute('balanced', 'general', [seat('Work', 50), seat('Pro', 77)], { large: true }).side, 'claude');
+  for (const seats of [ROOMY, TODAY, FULL, []]) {
+    for (const large of [false, true]) {
+      const r = leanRoute('balanced', 'general', seats, { large });
+      assert.deepEqual([r.side, r.seat], ['claude', null], `${JSON.stringify(seats)} large=${large}`);
+      assert.equal(r.reason, 'Balanced keeps general work on Claude, where it is best done.');
+    }
+  }
 });
 
 test('a nearly full or unknown seat never takes work, whatever the setting', () => {
@@ -131,10 +136,14 @@ test('the Right now rows for each setting', () => {
   assert.deepEqual(rows('balanced', TODAY, CURSOR), [
     ['Image work', 'Studio', '41% used this week'],
     ['Simple mechanical work', 'Cursor', '<1% used this month'],
-    ['Large general jobs', 'Claude', 'Default is capped'],
     ['Everything else', 'Claude', null],
   ]);
-  assert.deepEqual(rows('balanced', ROOMY, CURSOR)[2], ['Large general jobs', 'Pro', '12% used this week']);
+  // A roomy GPT seat no longer adds a "Large general jobs" row.
+  assert.deepEqual(rows('balanced', ROOMY, CURSOR), [
+    ['Image work', 'Pro', '12% used this week'],
+    ['Simple mechanical work', 'Cursor', '<1% used this month'],
+    ['Everything else', 'Claude', null],
+  ]);
   assert.deepEqual(rows('lean-openai', TODAY, CURSOR), [
     ['Image work', 'Studio', '41% used this week'],
     ['Simple mechanical work', 'Cursor', '<1% used this month'],
@@ -149,7 +158,7 @@ test('the Right now rows for each setting', () => {
   const v = leanVerdict('lean-claude', TODAY, CURSOR);
   assert.equal(v.summary, 'Image work: Studio (41% used this week). Simple mechanical work: Cursor (<1% used this month). Everything else: Claude.');
   assert.deepEqual([v.gpt, v.seat.label], ['image', 'Studio']);
-  assert.deepEqual([leanVerdict('lean-openai', TODAY, CURSOR).gpt, leanVerdict('balanced', ROOMY, CURSOR).gpt, leanVerdict('claude-only', ROOMY).gpt], ['prefer', 'large', 'off']);
+  assert.deepEqual([leanVerdict('lean-openai', TODAY, CURSOR).gpt, leanVerdict('balanced', ROOMY, CURSOR).gpt, leanVerdict('claude-only', ROOMY).gpt], ['prefer', 'image', 'off']);
   for (const mode of ['claude-only', 'lean-claude', 'balanced', 'lean-openai']) {
     for (const row of leanVerdict(mode, TODAY, CURSOR).rows) assert.ok(!DASHES.test(JSON.stringify(row)), mode);
   }
@@ -193,14 +202,9 @@ test('a seat with a reset waiting is not out: it takes the work when no seat has
     assert.equal(image.reason, 'Studio is 97% used but has 1 reset waiting; apply one when it runs out.');
   }
   assert.equal(leanRoute('lean-openai', 'general', OCT8).seat.label, 'Studio');
-  // Balanced: a capped seat WITHOUT a reset still keeps large jobs home (Pat, 2026-10-05).
-  assert.equal(leanRoute('balanced', 'general', OCT8, { large: true }).reason, 'Default, Work are capped.');
-  // A capped seat WITH a reset is not "capped", and takes the large job when nothing is under 50%.
-  const tight = [withReset('Work', 62, 0), withReset('Studio', 100, 2)];
-  const large = leanRoute('balanced', 'general', tight, { large: true });
-  assert.deepEqual([large.side, large.seat.label, large.reason], ['gpt', 'Studio', 'Studio is 100% used but has 2 resets waiting; apply one when it runs out.']);
-  // A seat with room by its weekly number still comes first; no reset is spent for nothing.
-  assert.equal(leanRoute('balanced', 'general', [withReset('Work', 12, 0), withReset('Studio', 97, 1)], { large: true }).seat.label, 'Work');
+  // Balanced keeps general work on Claude: a waiting reset never pulls it to a GPT seat (Pat, 2026-10-18).
+  assert.equal(leanRoute('balanced', 'general', [withReset('Work', 62, 0), withReset('Studio', 100, 2)], { large: true }).side, 'claude');
+  assert.equal(leanRoute('balanced', 'general', [withReset('Work', 12, 0), withReset('Studio', 97, 1)], { large: true }).side, 'claude');
   assert.equal(leanRoute('lean-openai', 'general', [withReset('Work', 40, 0), withReset('Studio', 30, 1)]).reason, 'Heavy lifting leans OpenAI.');
   // Zero or unknown resets change nothing.
   for (const resets of [0, null, undefined, -1, 1.5]) {
