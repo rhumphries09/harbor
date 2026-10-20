@@ -2693,6 +2693,7 @@ app.whenReady().then(async () => {
   transcriptProvider = createTranscriptProvider({
     // The readable form: a compressed codex rollout opens from its plain copy.
     getSessionMeta: (id) => sidebarBridge.getReadableSessionMeta(id),
+    providerPaneAlive: (id, provider) => sidebarBridge.providerPaneAlive(id, provider),
     contextCacheDir: contextDir,
   });
   transcriptProvider.emitter.on('update', (payload) => {

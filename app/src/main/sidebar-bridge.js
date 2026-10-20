@@ -777,6 +777,17 @@ function createSidebarBridge(options = {}) {
     // right then names the session in seconds instead of at the next tick.
     resolveProviderSessions: () => providerLinker?.resolveNow() ?? false,
     providerSessionForPane: (paneId) => providerLinker?.get(paneId) ?? null,
+    // Is a live pane running this provider's agent on this session? The
+    // daemon detects the pane's foreground agent from its process tree, and a
+    // link exists only while that pane and agent do, so this is the codex
+    // owner-liveness answer the transcript provider has no tee or beacon for.
+    providerPaneAlive: (sessionId, provider) => {
+      const panes = providerLinker ? providerLinker.apply(liveState.panes) : liveState.panes;
+      return panes.some((pane) => {
+        const named = typeof pane?.agent_session === 'string' ? pane.agent_session : pane?.agent_session?.value;
+        return pane?.agent === provider && named === sessionId;
+      });
+    },
     getLivePaneIds: () => liveState.panes.map((pane) => pane.pane_id),
     getHistoryRow: (id) => historyById.get(id),
     getState: () => publisher.getState(),
