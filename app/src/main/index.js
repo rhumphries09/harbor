@@ -2691,7 +2691,8 @@ app.whenReady().then(async () => {
   // Conversation-surface plumbing: transcript tailing, the command-bar send
   // engine, and the provisional session<->pane link registry.
   transcriptProvider = createTranscriptProvider({
-    getSessionMeta: (id) => sidebarBridge.getSessionMeta(id),
+    // The readable form: a compressed codex rollout opens from its plain copy.
+    getSessionMeta: (id) => sidebarBridge.getReadableSessionMeta(id),
     contextCacheDir: contextDir,
   });
   transcriptProvider.emitter.on('update', (payload) => {
