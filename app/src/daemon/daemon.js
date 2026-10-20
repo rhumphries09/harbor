@@ -23,6 +23,7 @@ const {
 } = require('./dormancy.js');
 const { resolveOrphanPolicy, sweepOrphans, snapshotProcessTable } = require('./orphan-sweep.js');
 const { createProcessIntel } = require('./process-intel.js');
+const { createStateFileCache } = require('./state-cache.js');
 const {
   resolveJobPolicy, createSessionJob, openSessionJob, assignPid: assignJobPid,
   queryJob, terminateJob, closeJob,
@@ -149,8 +150,13 @@ function derivedIdentity(argv) {
   return { agent, agent_session: agentSession };
 }
 
+// Every request used to open and read its session's state file; the cache
+// re-reads a record only when its stat stamp moves. Why, with the measurements,
+// is the header of state-cache.js.
+const stateFiles = createStateFileCache();
+
 function readState(id) {
-  try { return JSON.parse(fs.readFileSync(statePath(id), 'utf8')); }
+  try { return stateFiles.readJson(statePath(id)); }
   catch { throw new Error(`session not found: ${id}`); }
 }
 
@@ -158,6 +164,7 @@ function removeSessionFiles(id) {
   for (const file of [statePath(id), configPath(id), keeperSocket(id), keeperLogPath(id)]) {
     try { fs.unlinkSync(file); } catch {}
   }
+  stateFiles.forget(statePath(id));
   // The exit-retention reap is the last time this id is ever seen, so the
   // daemon's job handle goes with the files: without this the handle map grew
   // by one entry per exited session for the daemon's whole life.
@@ -165,12 +172,14 @@ function removeSessionFiles(id) {
 }
 
 function readAllStateFiles() {
-  return fs.readdirSync(paths.sessions)
+  const files = fs.readdirSync(paths.sessions)
     .filter((name) => name.endsWith('.json') && !name.endsWith('.config.json'))
-    .map((name) => {
-      try { return JSON.parse(fs.readFileSync(path.join(paths.sessions, name), 'utf8')); }
-      catch { return null; }
-    }).filter(Boolean);
+    .map((name) => path.join(paths.sessions, name));
+  stateFiles.retain(files);
+  return files.map((file) => {
+    try { return stateFiles.readJson(file); }
+    catch { return null; }
+  }).filter(Boolean);
 }
 
 // A SESSION CANNOT OUTLIVE ITS BOOT, so one that claims to is not reported as

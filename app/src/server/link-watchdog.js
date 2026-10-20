@@ -18,6 +18,18 @@
 // (Harbor closed, or restarting); exiting would only park the respawned server
 // in waitForDaemon with Notes and Tasks dark, so it stays up and keeps serving
 // what it can.
+//
+// IT COUNTS BURSTS, NOT ERRORS (2026-10-20). It used to trip on 4 link errors,
+// and ONE slow daemon moment produces that many by itself: the client's
+// request timeout destroys its socket, which rejects every other request in
+// flight with "connection closed" in the same millisecond, and the client
+// reconnects on its own at the next request, so nothing was stale. On a day
+// the live daemon stalled 5 to 15 s at a time (sessiond.md, the state-file
+// read bullet), each stall restarted this server, about every 3 minutes for
+// hours (64 restarts logged), and every restart re-read about 3 GB at startup,
+// load that fed the next stall. A real stale link fails on EVERY poll, so it
+// still shows a new burst every ~10 s and trips in well under a minute; a
+// single stall is one burst and never does.
 
 const LINK_ERROR = /timed out|connection closed|ECONNRESET|EPIPE|not connected|socket/i;
 
@@ -26,31 +38,34 @@ function createLinkWatchdog({
   exit, // (code) => void
   log = () => {},
   windowMs = 120_000,
-  errorsToTrip = 4,
+  burstsToTrip = 4,
+  // A link error more than this long after the previous one starts a new burst.
+  burstGapMs = 5_000,
   now = () => Date.now(),
 } = {}) {
   if (typeof ping !== 'function' || typeof exit !== 'function') throw new TypeError('createLinkWatchdog requires ping and exit');
-  let errors = [];
+  let bursts = []; // start time of each burst
+  let lastErrorAt = null;
   let checking = false;
   let tripped = false;
 
   async function check() {
     if (checking || tripped) return;
     const cutoff = now() - windowMs;
-    errors = errors.filter((t) => t >= cutoff);
-    if (errors.length < errorsToTrip) return;
+    bursts = bursts.filter((t) => t >= cutoff);
+    if (bursts.length < burstsToTrip) return;
     checking = true;
     try {
       await ping();
     } catch (error) {
-      log(`link watchdog: ${errors.length} link errors in ${Math.round(windowMs / 1000)} s, but the daemon itself is unreachable (${error.message}); staying up`);
-      errors = [];
+      log(`link watchdog: ${bursts.length} link-error bursts in ${Math.round(windowMs / 1000)} s, but the daemon itself is unreachable (${error.message}); staying up`);
+      bursts = [];
       return;
     } finally {
       checking = false;
     }
     tripped = true;
-    log(`link watchdog: ${errors.length} link errors in ${Math.round(windowMs / 1000)} s while the daemon answers a fresh ping; exiting so run-server.cmd starts a clean server`);
+    log(`link watchdog: ${bursts.length} separate link-error bursts in ${Math.round(windowMs / 1000)} s while the daemon answers a fresh ping; exiting so run-server.cmd starts a clean server`);
     exit(75);
   }
 
@@ -59,11 +74,13 @@ function createLinkWatchdog({
     note(source, error) {
       const message = String(error?.message || error || '');
       if (!LINK_ERROR.test(message)) return;
-      errors.push(now());
+      const at = now();
+      if (lastErrorAt === null || at - lastErrorAt > burstGapMs) bursts.push(at);
+      lastErrorAt = at;
       check().catch(() => {});
     },
     check,
-    get pending() { return errors.length; },
+    get pending() { return bursts.length; },
   };
 }
 
