@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
+// FIRST, before child_process is destructured below: this detached process has no console, so anything it
+// starts without windowsHide gets a visible one (see win-hide-children.js).
+require('./win-hide-children.js').install();
+
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');

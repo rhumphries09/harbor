@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
+// FIRST, before node-pty loads: its ConPTY kill() forks a bare node.exe, which draws a console window from
+// this console-less process (see win-hide-children.js).
+require('./win-hide-children.js').install();
+
 const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');

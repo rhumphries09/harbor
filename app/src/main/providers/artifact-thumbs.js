@@ -54,7 +54,7 @@ function createArtifactThumbs(options = {}) {
 
   function run(cmd, args, timeoutMs = 20000) {
     return new Promise((resolve) => {
-      execFile(cmd, args, { timeout: timeoutMs }, (error) => resolve(!error));
+      execFile(cmd, args, { timeout: timeoutMs, windowsHide: true }, (error) => resolve(!error));
     });
   }
 

@@ -36,6 +36,9 @@
 // HARBOR_SESSIOND_WATCH_INTERVAL_MS=0 turns health probing (wedge detection)
 // off. Both default on.
 
+// FIRST, before child_process is destructured: this detached watcher has no console (see win-hide-children.js).
+require('./win-hide-children.js').install();
+
 const { spawn } = require('node:child_process');
 const net = require('node:net');
 const { appendLog } = require('./log-file.js');

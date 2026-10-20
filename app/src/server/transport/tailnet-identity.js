@@ -170,7 +170,7 @@ function createTailnetAuthorizer({ allowedLogins = [], trustedPeerUids = null, p
 function readSelfLogin({ execFileImpl = execFile, timeout = 5000 } = {}) {
   return new Promise((resolve) => {
     try {
-      execFileImpl('tailscale', ['status', '--json'], { timeout, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+      execFileImpl('tailscale', ['status', '--json'], { timeout, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
         if (error) { resolve(null); return; }
         try {
           const parsed = JSON.parse(String(stdout));

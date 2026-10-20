@@ -99,7 +99,7 @@ function assertSafeBind(host) {
 // as before, because they never depended on this.
 async function resolveSelfMagicDnsName({ env = process.env, execFileImpl = execFile } = {}) {
   return new Promise((resolve) => {
-    execFileImpl('tailscale', ['status', '--json'], { timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+    execFileImpl('tailscale', ['status', '--json'], { timeout: 5000, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
       if (error) { resolve(null); return; }
       try {
         const parsed = JSON.parse(String(stdout));
