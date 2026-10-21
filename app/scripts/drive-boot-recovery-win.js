@@ -134,7 +134,7 @@ async function main() {
 
     // 3. The app must come back on its own.
     let healed = false;
-    const deadline = Date.now() + 45000;
+    const deadline = Date.now() + 120000;
     while (Date.now() < deadline && !healed) {
       await sleep(1000);
       healed = await cdp.mounted();

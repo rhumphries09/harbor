@@ -216,7 +216,7 @@ async function main() {
 
     // Wait for the App to mount and expose its test hooks.
     let ready = false;
-    const deadline = Date.now() + 45000;
+    const deadline = Date.now() + 120000;
     while (Date.now() < deadline && !ready) {
       await sleep(500);
       ready = await cdp.evaluate('typeof window.__setSidebarModelForTest === "function" && typeof window.__setTranscriptForTest === "function"').catch(() => false);

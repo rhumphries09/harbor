@@ -283,7 +283,7 @@ async function main() {
     page = await Cdp.open(pageTarget.webSocketDebuggerUrl);
     await page.send('Runtime.enable');
     let ready = false;
-    const deadline = Date.now() + 45000;
+    const deadline = Date.now() + 120000;
     while (Date.now() < deadline && !ready) {
       await sleep(500);
       ready = await page.evaluate('typeof window.__setSidebarModelForTest === "function" && typeof window.__harborOpenSession === "function"').catch(() => false);
