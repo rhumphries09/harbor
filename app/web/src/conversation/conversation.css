@@ -149,6 +149,47 @@
   white-space: pre;
 }
 
+/* The shared markdown renderer wraps every fenced block with a Copy button, and
+   only the desktop sheet ever styled it, so on the phone it rendered as a bare
+   white browser button floating above the code (2026-10-21 sweep). It sits in
+   a slim bar ABOVE the code now: a corner overlay covered the end of the first
+   line, which on a phone is exactly where a short command ends. */
+.md-code-wrap {
+  display: flex;
+  flex-direction: column;
+  margin: 6px 0;
+  overflow: hidden;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.conv-assistant .md-code-wrap .md-code,
+.conv-user .md-code-wrap .md-code {
+  margin: 0;
+  padding-top: 2px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.md-code-copy {
+  align-self: flex-end;
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--fnt);
+  font: 600 12px var(--font-ui);
+}
+
+.md-code-copy:active {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.md-code-copy.is-copied {
+  color: var(--live);
+}
+
 .conv-assistant code,
 .conv-user code {
   padding: 1px 5px;
@@ -448,4 +489,40 @@
   height: 10px;
   border-radius: 50%;
   border: 2px solid var(--ac2);
+}
+
+/* The "Latest" pill (Conversation.jsx). A zero-height sticky dock at the end of
+   the scroller, so it rides the bottom of the visible conversation while the
+   reader is up the page and takes no room at all at the tail. Static: it
+   appears and disappears, it does not animate. */
+.conv-jump-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  justify-content: center;
+  height: 0;
+  pointer-events: none;
+}
+
+.conv-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--touch-min);
+  padding: 0 16px;
+  transform: translateY(calc(-100% - 10px));
+  border: 1px solid var(--ln2);
+  border-radius: var(--radius-pill);
+  background: #1b1e26;
+  box-shadow: var(--shadow-pop);
+  color: var(--tx);
+  font-size: 13.5px;
+  font-weight: 600;
+  pointer-events: auto;
+}
+
+.conv-jump svg {
+  width: 15px;
+  height: 15px;
 }

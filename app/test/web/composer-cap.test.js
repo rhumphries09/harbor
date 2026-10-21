@@ -23,7 +23,9 @@ for (const viewport of [844, 400]) for (const extras of [0, 100]) test(`composer
     const module = { exports: {} };
     const stubs = { useRpc: () => ({}), useSend: () => ({ queue: { count: 0 } }), useAttachments: () => ({ attachments: [] }), useCapabilities: () => ({ capabilities: {} }), useVoiceDraft: () => ({ voiceState: {} }), useSlashState: () => ({ chrome: {} }), useComposerLiveVoice: () => null, useQuestionReply: () => null };
     new Function('require', 'module', 'exports', code)(id => id === 'react' ? react : stubs, module, module.exports);
-    module.exports.Composer({ sessionId: 'toy' }); refs[1].current = node;
+    // The textarea ref is the one that starts empty; the others hold the
+    // session id. Found by that, not by position, so a new ref cannot break it.
+    module.exports.Composer({ sessionId: 'toy' }); refs.find((ref) => ref.current === null).current = node;
     for (const effect of effects) effect();
     const cap = Math.max(44, Math.min(150, viewport * .4 - extras - 17));
     assert.ok(parseFloat(node.style.height) <= cap, `field ${node.style.height} exceeded ${cap}px`);

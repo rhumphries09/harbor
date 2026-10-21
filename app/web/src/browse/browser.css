@@ -118,8 +118,12 @@
   display: none;
 }
 
+/* Bounded: with many sessions waiting, an unbounded pinned block was the
+   whole drawer and the session list got no room (2026-10-21 review). */
 .session-browser-pinned {
   flex: 0 0 auto;
+  max-height: 40%;
+  overflow-y: auto;
   border-bottom: 1px solid var(--ln);
   background: var(--bg);
 }

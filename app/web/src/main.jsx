@@ -79,11 +79,23 @@ function ConnectScreen({ initial, onConnect }) {
   );
 }
 
-function Splash() {
+// A phone the tailnet has authenticated before (no token stored) may open its
+// SAVED list and conversations while the server cannot be asked; the socket
+// still has to authenticate before anything reaches the server
+// (setup-gate.cjs).
+const AUTH_OK_KEY = 'harbor-web-tailnet-ok';
+function rememberAuthenticated(serverUrl) {
+  try { localStorage.setItem(AUTH_OK_KEY, serverUrl || ''); } catch { /* memory only */ }
+}
+function wasAuthenticated(serverUrl) {
+  try { return localStorage.getItem(AUTH_OK_KEY) === (serverUrl || ''); } catch { return false; }
+}
+
+function Splash({ unavailable = false }) {
   return (
     <div className="splash" role="status" aria-live="polite">
       <div className="splash-mark" />
-      <p>Connecting to Harbor…</p>
+      <p>{unavailable ? 'Can’t reach Harbor on your PC yet. Still trying…' : 'Connecting to Harbor…'}</p>
     </div>
   );
 }
@@ -100,13 +112,42 @@ function App() {
   }, []);
 
   useEffect(() => {
+    // An unreachable server is asked again (every 3 s, and at once when the
+    // page or the network comes back) instead of being taken as "token
+    // required"; see setup-gate.cjs.
+    //
+    // Only the NEWEST answer counts, and "could not ask" never undoes an
+    // answer already given (2026-10-21, second Sol review): a slow first probe
+    // that came back 503 after a newer one had succeeded replaced the success,
+    // unmounted a connected app and closed its socket. Unavailability is the
+    // connection pill's to report; only an explicit refusal re-gates.
     let cancelled = false;
-    probeAuth(settings.serverUrl).then((result) => { if (!cancelled) setAuth(result); });
-    return () => { cancelled = true; };
+    let timer = null;
+    let generation = 0;
+    const ask = () => {
+      clearTimeout(timer);
+      const mine = ++generation;
+      probeAuth(settings.serverUrl).then((result) => {
+        if (cancelled || mine !== generation) return;
+        if (result.authenticated) rememberAuthenticated(settings.serverUrl);
+        setAuth((prior) => (result.unavailable && prior && !prior.unavailable ? prior : result));
+        if (result.unavailable) timer = setTimeout(ask, 3000);
+      });
+    };
+    const again = () => { if (document.visibilityState !== 'hidden') ask(); };
+    ask();
+    window.addEventListener('online', again);
+    document.addEventListener('visibilitychange', again);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      window.removeEventListener('online', again);
+      document.removeEventListener('visibilitychange', again);
+    };
   }, [settings.serverUrl]);
 
-  const gate = setupGate({ settings, auth });
-  if (gate === 'pending') return <Splash />;
+  const gate = setupGate({ settings, auth, rememberedAuth: wasAuthenticated(settings.serverUrl) });
+  if (gate === 'pending') return <Splash unavailable={Boolean(auth?.unavailable)} />;
 
   if (gate === 'setup' || forceSetup) {
     return (
@@ -127,6 +168,7 @@ function App() {
       auth={auth}
       onRequestSetup={() => setForceSetup(true)}
       onSignOut={() => {
+        try { localStorage.removeItem(AUTH_OK_KEY); } catch { /* nothing to forget */ }
         const cleared = { serverUrl: settings.serverUrl, token: '' };
         saveSettings(cleared);
         setSettings(cleared);

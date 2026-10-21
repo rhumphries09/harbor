@@ -45,6 +45,28 @@ export function writeCachedSidebar(model) {
   return write(`${PREFIX}sidebar`, { model, at: Date.now() }, MAX_SIDEBAR_CHARS);
 }
 
+// The Tasks and Notes documents (2026-10-21 review): each view held its doc in
+// component state, so leaving the tab dropped it and coming back offline showed
+// "Loading…" over a list the phone had already read. The last doc is kept here
+// (and in memory, so a tab switch costs no parse) and painted until the server
+// answers; edits still go through the server's mutation contract.
+const MAX_DOC_CHARS = 600_000;
+const docMemory = new Map();
+
+export function readCachedDoc(name) {
+  if (docMemory.has(name)) return docMemory.get(name);
+  const hit = read(`${PREFIX}doc:${name}`);
+  const doc = hit?.doc && typeof hit.doc === 'object' ? hit.doc : null;
+  if (doc) docMemory.set(name, doc);
+  return doc;
+}
+
+export function writeCachedDoc(name, doc) {
+  if (!doc || typeof doc !== 'object') return false;
+  docMemory.set(name, doc);
+  return write(`${PREFIX}doc:${name}`, { doc, at: Date.now() }, MAX_DOC_CHARS);
+}
+
 export function readCachedTranscript(sessionId) {
   if (!sessionId) return null;
   const hit = read(`${PREFIX}t:${sessionId}`);

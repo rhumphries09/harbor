@@ -83,7 +83,9 @@ export function useSend({ sessionId, paneId, onSent }) {
       });
       const ok = showResult(result, 'send failed');
       if (ok && reply) replyStore.cancel(sessionId,reply.id);
-      await refreshQueue();
+      // A read, not part of the send: an acknowledged send never waits on it
+      // (2026-10-21, second Sol review: a stuck refresh kept Send spinning).
+      refreshQueue().catch(() => {});
       if (ok) onSent?.(result);
       return { ok, result };
     } catch (error) {

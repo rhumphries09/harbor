@@ -55,6 +55,8 @@ self.addEventListener('message', (event) => {
 });
 
 const NEVER_CACHE = ['/ws', '/health', '/icons/', '/artifact'];
+// How long a launch waits for the network before it opens the saved shell.
+const DOC_WAIT_MS = 3500;
 
 self.addEventListener('fetch', (event) => {
   const { request } = event;
@@ -72,7 +74,13 @@ self.addEventListener('fetch', (event) => {
       const hit = await caches.match(request);
       if (hit) return hit;
       const res = await fetch(request);
-      if (res.ok) (await caches.open(ASSETS)).put(request, res.clone());
+      // Saving is optional: a full or refused cache never costs the response.
+      // The copy is taken NOW: once the response is handed back the page starts
+      // reading its body, and a clone taken later fails, saving nothing.
+      if (res.ok) {
+        const copy = res.clone();
+        event.waitUntil(caches.open(ASSETS).then((cache) => cache.put(request, copy)).catch(() => {}));
+      }
       return res;
     })());
     return;
@@ -80,14 +88,62 @@ self.addEventListener('fetch', (event) => {
 
   // Everything else, and navigations above all: network first. The cache is a
   // fallback for being offline, never a source of truth.
+  //
+  // A FALLBACK THAT NEVER FIRES IS NOT ONE (2026-10-21 review, finding 15). The
+  // cached shell was used only when fetch THREW, but the usual way the server is
+  // unreachable is a restart behind `tailscale serve`, which ANSWERS with a 502:
+  // a resolved fetch, so the phone showed the proxy's error page instead of its
+  // cached app. And a dead tunnel made the launch wait as long as the OS let a
+  // request hang. Now a document gets the network for DOC_WAIT_MS; a 5xx, an
+  // error or no answer in time serves the saved shell (whose own client retries
+  // the connection). 4xx answers (authentication, origin refusals) still go
+  // straight to the page.
+  //
+  // ONLY A DOCUMENT THAT WAS SERVED IS SAVED (2026-10-21, second Sol review,
+  // P0). The first version let a late network answer replace the saved shell
+  // after the old one had been served: the browser never loaded that new page,
+  // so its hashed bundle was never fetched or cached, and the next offline
+  // launch got a page whose code could not load, a blank screen. A late answer
+  // is now dropped; the next launch fetches it properly. And saving is
+  // optional: a refused cache write never costs a good response.
   const isDoc = request.mode === 'navigate' || (request.headers.get('accept') || '').includes('text/html');
+  if (isDoc) {
+    event.respondWith((async () => {
+      const network = fetch(request, { cache: 'no-store' });
+      const saved = () => caches.match('/index.html');
+      const keep = (res) => {
+        if (res.ok) {
+          const copy = res.clone(); // now, before the page reads the body
+          event.waitUntil(caches.open(SHELL).then((cache) => cache.put('/index.html', copy)).catch(() => {}));
+        }
+        return res;
+      };
+      let timer;
+      const late = new Promise((resolve) => { timer = setTimeout(() => resolve('late'), DOC_WAIT_MS); });
+      try {
+        const first = await Promise.race([network, late]);
+        if (first === 'late') {
+          const hit = await saved();
+          if (hit) { network.catch(() => {}); return hit; }
+          return keep(await network);
+        }
+        if (first.status >= 500) return (await saved()) || first;
+        return keep(first);
+      } catch (error) {
+        const hit = await saved();
+        if (hit) return hit;
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    })());
+    return;
+  }
   event.respondWith((async () => {
     try {
-      const res = await fetch(request, { cache: 'no-store' });
-      if (res.ok && isDoc) (await caches.open(SHELL)).put('/index.html', res.clone());
-      return res;
+      return await fetch(request, { cache: 'no-store' });
     } catch (error) {
-      const hit = await caches.match(isDoc ? '/index.html' : request);
+      const hit = await caches.match(request);
       if (hit) return hit;
       throw error;
     }

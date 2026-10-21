@@ -1,15 +1,25 @@
+/* Bounded by the VISIBLE height, never vh (2026-10-21 review, P0): 68vh is
+   68% of the full layout viewport, 634px on this phone, so with the keyboard up
+   (552px visible) the card alone outgrew the screen and pushed the composer
+   under the keyboard. While the composer has focus the card gives up more room;
+   while the card's own field has focus it keeps it. Its option list scrolls. */
 .ask-card {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 68vh;
-  margin: 0 14px calc(12px + var(--safe-bottom));
-  padding: 12px 12px calc(12px + var(--safe-bottom));
+  max-height: calc(var(--app-h, 100dvh) * 0.5);
+  margin: 0 14px 12px;
+  padding: 12px;
   border: 1px solid rgba(212, 165, 55, 0.4);
   border-radius: 16px;
   background: rgba(23, 20, 12, 0.72);
-  overflow: hidden;
+  /* The WHOLE card scrolls inside its cap, explanation and choices together:
+     with only the option list scrolling, a long explanation took the whole
+     cap and the list was left zero pixels tall, so no answer could be reached
+     (2026-10-21, second review: seven paragraphs, ten choices). */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .ask-head {
@@ -65,7 +75,7 @@
 .ask-screen {
   margin: 0;
   padding: 10px;
-  max-height: 30vh;
+  max-height: calc(var(--app-h, 100dvh) * 0.3);
   overflow: auto;
   border-radius: 10px;
   background: rgba(0, 0, 0, 0.4);
@@ -111,6 +121,23 @@
   line-height: 1.35;
 }
 
+.ask-q-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ask-q-block .ask-q {
+  font-size: 16px;
+}
+
+.ask-q-detail {
+  margin: 0;
+  color: var(--sub);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
 .ask-err {
   padding: 8px 10px;
   border-radius: 10px;
@@ -152,12 +179,10 @@
 }
 
 .ask-list {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  min-height: 0;
 }
 
 .ask-item {

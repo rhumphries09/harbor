@@ -60,9 +60,11 @@ function NoteEditor({ note, opener, onClosed, mutate }) {
   useEffect(() => {
     const background = document.querySelectorAll('.app-header, .app-main, .bottom-nav');
     background.forEach((node) => { node.inert = true; });
-    // A note with content opens ready to read/continue in the body; a blank new
-    // note opens on the title, cursor waiting.
-    (note.title || note.body ? bodyRef.current : titleRef.current)?.focus({ preventScroll: true });
+    // A saved note opens for READING: focusing its body raised the keyboard
+    // over half the note every time one was opened just to be read or copied
+    // (2026-10-21 review). A tap in the text starts editing. A blank new note
+    // still opens on the title, cursor waiting.
+    if (!note.title && !note.body) titleRef.current?.focus({ preventScroll: true });
     const onKey = (event) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();

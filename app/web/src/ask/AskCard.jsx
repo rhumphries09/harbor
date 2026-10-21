@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import './ask.css';
+import { CONNECTION } from '../rpc/client.js';
 import { ModelSwitchCard } from '../../../src/renderer/stage/ModelSwitchCard.jsx';
 import { ScrapedPermissionCard, PermissionFeedbackFailure } from '../../../src/renderer/stage/PermissionCard.jsx';
 
@@ -53,18 +54,33 @@ export function AskCard({ client, pane, sessionId, blockedHint }) {
     if (!client || !paneId) { setMenu(null); return undefined; }
     let live = true;
     let timer = null;
+    // Nothing is asked while the app is hidden or the link is down (2026-10-21
+    // review: about 86 calls a minute ran behind a locked screen, and a call
+    // that cannot be delivered cleared a question that was still waiting).
+    // Coming back to the app reads at once.
+    const hidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden';
     const tick = async () => {
       if (!live) return;
-      if (!busyRef.current) {
+      clearTimeout(timer);
+      const linked = !client.getState || client.getState() === CONNECTION.connected;
+      if (!busyRef.current && !hidden() && linked) {
         try {
           const next = await client.call('session:menu-state', { pane: paneRef.current, sessionId, blockedHint: blockedRef.current });
           if (live && !busyRef.current) setMenu(next && (next.kind === 'model-switch' || next.options?.length || next.fallback) ? next : null);
-        } catch { if (live) setMenu(null); }
+        } catch (error) {
+          if (live && !/not connected|connection dropped/.test(String(error?.message))) setMenu(null);
+        }
       }
       if (live) timer = setTimeout(tick, 700);
     };
+    const onVisible = () => { if (!hidden()) tick(); };
     tick();
-    return () => { live = false; if (timer) clearTimeout(timer); };
+    document.addEventListener?.('visibilitychange', onVisible);
+    return () => {
+      live = false;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener?.('visibilitychange', onVisible);
+    };
   }, [client, paneId, workspaceId, sessionId]);
 
   const refresh = async () => {
@@ -256,7 +272,16 @@ export function AskCard({ client, pane, sessionId, blockedHint }) {
       {/* Never fabricate a question heading: if the transcript did not
           supply one, this simply stays empty and the option list below is
           all the card shows, exactly like the desktop card. */}
-      {menu.question ? <div className="ask-q">{menu.question}</div> : null}
+      {/* A dialog drawn as several paragraphs reads as a title over its
+          explanation, not as one bold run-on (2026-10-21). */}
+      {menu.questionParagraphs?.length > 1 ? (
+        <div className="ask-q-block">
+          <div className="ask-q">{menu.questionParagraphs[0]}</div>
+          {menu.questionParagraphs.slice(1).map((paragraph, index) => (
+            <p key={index} className="ask-q-detail">{paragraph}</p>
+          ))}
+        </div>
+      ) : menu.question ? <div className="ask-q">{menu.question}</div> : null}
       {answerError ? <div className="ask-err">{answerError}</div> : null}
       <div className="ask-list">
         {menu.options.map((option) => (

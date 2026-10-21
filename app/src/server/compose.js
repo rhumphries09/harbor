@@ -50,7 +50,7 @@ const { ensureServerToken } = require('./transport/auth.js');
 const { createTailnetAuthorizer, resolveAllowedLogins } = require('./transport/tailnet-identity.js');
 const { createImageUploader } = require('./upload.js');
 const { projectRail, createContextReader } = require('./phone-rail.js');
-const { createLinkWatchdog } = require('./link-watchdog.js');
+const { createLinkWatchdog, createLoopLagMonitor } = require('./link-watchdog.js');
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 
@@ -234,6 +234,35 @@ async function composeServer(options = {}) {
     releasers: { transcript: (sessionId) => transcript.close(sessionId) },
     logger,
   });
+  // EACH TRANSCRIPT GOES ONLY TO THE CLIENTS HOLDING IT (2026-10-21 audit).
+  // Every socket used to receive every open session's updates, filtered on the
+  // phone after the bytes had crossed the link: a busy chat or a second device
+  // slowed an unrelated conversation, and a Notes-only viewer got full
+  // transcripts it never asked for. Delivery now asks clientResources, plus the
+  // opens still in flight (an open's first snapshot is emitted before it
+  // returns, so its requester is not a holder yet). A re-open of a session
+  // already open re-emits a snapshot synchronously inside transcript.open();
+  // that one is tagged for its requester alone, since every other holder is
+  // already current. An open whose client left mid-flight gives its ref back.
+  const opening = new Map(); // clientId -> Set of { sessionId, gone }
+  const snapshotFor = new WeakMap(); // emitted payload -> the one client it is for
+  let openingNow = null;
+  const isOpening = (clientId, sessionId) => {
+    for (const pending of opening.get(clientId) || []) if (pending.sessionId === sessionId) return true;
+    return false;
+  };
+  const deliverPush = (clientId, channel, args) => {
+    if (channel !== 'transcript:update') return true;
+    const payload = args?.[0];
+    if (!payload?.sessionId) return true;
+    if (snapshotFor.has(payload)) return snapshotFor.get(payload) === clientId;
+    return clientResources.holds(clientId, 'transcript', payload.sessionId) || isOpening(clientId, payload.sessionId);
+  };
+  const clientGone = (clientId) => {
+    for (const pending of opening.get(clientId) || []) pending.gone = true;
+    opening.delete(clientId);
+    clientResources.releaseAll(clientId);
+  };
   const links = options.links || createLinkRegistry();
   const sendClient = options.sendClient || createControlClient({ env, sessionStorePolicy });
   const platform = options.platform || createPlatform(process.platform, { env, processKill: guardedKill });
@@ -389,9 +418,28 @@ async function composeServer(options = {}) {
     // and the refcount can never reach zero again, so even an honest close from
     // another client cannot free it.
     'transcript:open': async (payload = {}, ctx = {}) => {
-      const result = await transcript.open(payload.sessionId, payload);
-      if (result?.ok !== false) clientResources.acquire(ctx.clientId, 'transcript', payload.sessionId);
-      return result;
+      const { clientId } = ctx;
+      const { sessionId } = payload;
+      const pending = { sessionId, gone: false };
+      if (clientId) {
+        if (!opening.has(clientId)) opening.set(clientId, new Set());
+        opening.get(clientId).add(pending);
+      }
+      try {
+        openingNow = clientId ? { clientId, sessionId } : null;
+        const opened = transcript.open(sessionId, payload);
+        openingNow = null;
+        const result = await opened;
+        if (result?.ok !== false) {
+          if (pending.gone) transcript.close(sessionId);
+          else clientResources.acquire(clientId, 'transcript', sessionId);
+        }
+        return result;
+      } finally {
+        openingNow = null;
+        opening.get(clientId)?.delete(pending);
+        if (opening.get(clientId)?.size === 0) opening.delete(clientId);
+      }
     },
     'transcript:close': ({ sessionId } = {}, ctx = {}) => {
       // A caller with an identity may only close what it actually holds, so one
@@ -528,10 +576,18 @@ async function composeServer(options = {}) {
   // terminal bridges hold (link-watchdog.js). Off under every harness: a test
   // composition must never exit its runner.
   const harnessed = env.HARBOR_E2E === '1' || env.HARBOR_NO_DAEMON_START === '1' || options.skipDaemonStart;
+  // This process's own event-loop lag, logged when it passes a second. A stall
+  // here looks exactly like a slow daemon from inside (every request deadline
+  // fires at once when the loop resumes), so the log line is what tells the
+  // two apart, and the watchdog below refuses to count such echoes.
+  const loopLag = options.loopLag !== undefined ? options.loopLag : (harnessed ? null : createLoopLagMonitor({
+    log: (message) => console.error(`harbor-server: ${message}`),
+  }));
   const linkWatchdog = options.linkWatchdog !== undefined ? options.linkWatchdog : (harnessed ? null : createLinkWatchdog({
     ping: () => pingDaemonOnce({ env, sessionStorePolicy }),
     exit: (code) => process.exit(code),
     log: (message) => console.error(`harbor-server: ${message}`),
+    loopLag,
   }));
   const onSubsystemError = (source) => (error) => {
     console.error(`harbor-server: ${source} error (continuing):`, error?.message || error);
@@ -565,7 +621,12 @@ async function composeServer(options = {}) {
       router.emit('sidebar:update', projectRail(sidebarThrottlePayload, {}, { contextPct }));
     }, SIDEBAR_THROTTLE_MS);
   });
-  transcript.emitter?.on('update', (payload) => router.emit('transcript:update', payload));
+  transcript.emitter?.on('update', (payload) => {
+    if (openingNow && Array.isArray(payload?.replace) && payload.sessionId === openingNow.sessionId) {
+      snapshotFor.set(payload, openingNow.clientId);
+    }
+    router.emit('transcript:update', payload);
+  });
   sessionSend.emitter?.on('status', (payload) => router.emit('send:status', payload));
   links.emitter?.on('update', () => router.emit('links:update', links.all()));
   icons.watch?.((payload) => router.emit('project-icons:update', payload));
@@ -699,7 +760,8 @@ async function composeServer(options = {}) {
     // of a guess.
     queueMaxBytes: options.queueMaxBytes || 32 * 1024 * 1024,
     heartbeatMs: options.heartbeatMs,
-    onClientGone: (clientId) => clientResources.releaseAll(clientId),
+    onClientGone: clientGone,
+    deliverPush,
     logger,
   });
   return {
@@ -712,6 +774,7 @@ async function composeServer(options = {}) {
     },
     async close() {
       askInbox.stop();
+      loopLag?.close?.();
       transcript.closeAll?.(); terminalBridge.close?.(); sidebar.close?.(); tasks.close?.(); notes.close?.();
       await ws.close(); await new Promise((resolve) => server.close(resolve));
     },

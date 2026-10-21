@@ -38,7 +38,7 @@
 .slash-palette {
   position: fixed;
   z-index: 40;
-  max-height: 40vh;
+  max-height: calc(var(--app-h, 100dvh) * 0.35);
   overflow: auto;
   border: 1px solid var(--ln2);
   border-radius: 14px;

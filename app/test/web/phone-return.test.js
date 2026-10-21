@@ -94,6 +94,95 @@ test('a socket that still says open after a suspend must answer, or it is replac
   assert.ok(states.includes('disconnected') && states.at(-1) === 'connecting');
 });
 
+// 2026-10-21: the phone sat on "Connecting…" while the server was healthy. A
+// handshake that never completes used to wait for the OS to give up on it.
+test('a handshake that never completes is abandoned and retried', async (t) => {
+  const sockets = installFakeSocket(t);
+  const { createRpcClient } = await load('rpc/client.js');
+  const client = createRpcClient({ serverUrl: 'http://127.0.0.1:1', token: 't', lifecycle: fakeLifecycle(), connectTimeoutMs: 120 });
+  t.after(() => client.disconnect());
+  client.connect();
+  await sleep(60);
+  assert.equal(sockets.length, 1, 'a handshake gets its time');
+  await sleep(120);
+  assert.equal(sockets.length, 2, 'a handshake past the timeout is replaced');
+  assert.equal(sockets[0].closedWith, 4000);
+  assert.equal(client.getFailedAttempts(), 1, 'a timed-out handshake counts as a failure');
+  sockets[1].open();
+  await sleep(200);
+  assert.equal(sockets.length, 2, 'an open socket is never timed out');
+  assert.equal(client.getFailedAttempts(), 0);
+});
+
+test('coming back replaces a handshake started before the suspend, and leaves a fresh one alone', async (t) => {
+  const sockets = installFakeSocket(t);
+  const { createRpcClient } = await load('rpc/client.js');
+  const lifecycle = fakeLifecycle();
+  const client = createRpcClient({ serverUrl: 'http://127.0.0.1:1', token: 't', lifecycle, connectTimeoutMs: 60_000, wakeStaleConnectMs: 100 });
+  t.after(() => client.disconnect());
+  client.connect();
+  lifecycle.window.dispatchEvent(new Event('pageshow'));
+  await sleep(20);
+  assert.equal(sockets.length, 1, 'a handshake that just started is left to finish');
+  await sleep(600);
+  lifecycle.document.dispatchEvent(new Event('visibilitychange'));
+  await sleep(20);
+  assert.equal(sockets.length, 2, 'a stale handshake is replaced at once on return');
+  assert.equal(sockets[0].closedWith, 4000);
+});
+
+// 2026-10-21 review, finding 4: a socket the network swallowed kept saying OPEN
+// and every call waited forever, sends included.
+test('an open socket that stops answering is found by the heartbeat and replaced, failing what waited on it', async (t) => {
+  const sockets = installFakeSocket(t);
+  const { createRpcClient } = await load('rpc/client.js');
+  const client = createRpcClient({ serverUrl: 'http://127.0.0.1:1', token: 't', lifecycle: fakeLifecycle(), heartbeatMs: 60, heartbeatAnswerMs: 40 });
+  t.after(() => client.disconnect());
+  client.connect();
+  sockets[0].open();
+  await sleep(150);
+  assert.equal(sockets.length, 1, 'an answering socket survives its heartbeats');
+  sockets[0].answer = false;
+  const outcome = client.call('session:send', { text: 'hi' }).then(() => 'answered', (error) => error.message);
+  await sleep(200);
+  assert.equal(sockets.length, 2, 'a silent socket is replaced');
+  assert.match(await outcome, /connection dropped/, 'the waiting call fails instead of spinning');
+});
+
+// Second Sol review: heartbeats kept succeeding while one call never came back,
+// so Send could spin forever on a healthy socket.
+test('a call the server never answers ends at its deadline, an action at the longer one', async (t) => {
+  const sockets = installFakeSocket(t);
+  const { createRpcClient } = await load('rpc/client.js');
+  const client = createRpcClient({ serverUrl: 'http://127.0.0.1:1', token: 't', lifecycle: fakeLifecycle(), heartbeatMs: 60_000, callTimeoutMs: 60, actionTimeoutMs: 160 });
+  t.after(() => client.disconnect());
+  client.connect();
+  sockets[0].open();
+  sockets[0].answer = false;
+  const read = client.call('sidebar:get-state').then(() => 'answered', (error) => error.code);
+  const send = client.call('session:send', { text: 'hi' }).then(() => 'answered', (error) => error.message);
+  await sleep(100);
+  assert.equal(await read, 'TIMEOUT', 'a read ends at the short deadline');
+  assert.equal(await Promise.race([send, sleep(1).then(() => 'still waiting')]), 'still waiting', 'an action gets the longer deadline');
+  assert.match(await send, /may still have happened/, 'a timed-out action says it may have landed');
+  assert.equal(sockets.length, 1, 'a slow answer is not a dead socket');
+});
+
+test('retry now replaces a dead attempt and proves an open socket instead of dropping it', async (t) => {
+  const sockets = installFakeSocket(t);
+  const { createRpcClient } = await load('rpc/client.js');
+  const client = createRpcClient({ serverUrl: 'http://127.0.0.1:1', token: 't', lifecycle: fakeLifecycle(), connectTimeoutMs: 60_000 });
+  t.after(() => client.disconnect());
+  client.connect();
+  client.reconnectNow();
+  assert.equal(sockets.length, 2, 'a pending attempt is replaced');
+  sockets[1].open();
+  client.reconnectNow();
+  await sleep(30);
+  assert.equal(sockets.length, 2, 'an open socket is kept');
+  assert.equal(sockets[1].sent.at(-1).method, 'daemon:get-banner', 'and proven with a round trip');
+});
+
 function fakeStorage(t) {
   const map = new Map();
   const previous = globalThis.localStorage;

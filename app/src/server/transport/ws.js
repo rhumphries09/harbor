@@ -65,6 +65,14 @@ function coalesceKey(channel, args) {
 //
 // Returns null when the two cannot be combined, and the caller then keeps them
 // as separate items rather than guessing.
+//
+// ONE KEY, ONE COPY, LATEST WINS (2026-10-21 audit). Concatenating `changed`
+// kept every version of a block side by side, so a slow phone's slot grew by a
+// whole image-bearing prompt per token tick. The merge now replays the two
+// deltas in the order the shared reducer applies them (removed, changed,
+// patched, append; first delta, then second) into one copy per key, so the
+// merged item applies exactly like the two in sequence and is no bigger than
+// the newest state. Keyless blocks are kept as they are, in order.
 function mergePayloads(channel, previous, incoming) {
   if (channel !== 'transcript:update') return incoming;
   const a = previous?.args?.[0];
@@ -72,14 +80,40 @@ function mergePayloads(channel, previous, incoming) {
   if (!a || !b) return incoming;
   if (Array.isArray(b.replace)) return incoming;
   if (!Array.isArray(a.append) || !Array.isArray(b.append)) return null;
-  const merged = {
-    ...a,
-    ...b,
-    append: [...a.append.map((block) => (b.changed || []).find((updated) => updated.key && updated.key === block.key) || block), ...b.append]
-      .filter((block) => !(b.removed || []).includes(block.key)),
-    changed: [...(a.changed || []), ...(b.changed || [])].filter((block) => !(b.removed || []).includes(block.key)),
-    ...((a.removed?.length || b.removed?.length) ? { removed: [...new Set([...(a.removed || []), ...(b.removed || [])])] } : {}),
+  const appended = new Map(); // key -> block, in first-append order (where the reducer draws it)
+  const changed = new Map(); // key -> whole block
+  const patched = new Map(); // key -> merged patch
+  let keyless = 0;
+  const keyOf = (block) => (block?.key ? `k:${block.key}` : `n:${keyless++}`);
+  const take = (delta) => {
+    for (const key of delta.removed || []) {
+      appended.delete(`k:${key}`); changed.delete(`k:${key}`); patched.delete(`k:${key}`);
+    }
+    for (const block of delta.changed || []) {
+      const key = keyOf(block);
+      if (appended.has(key)) appended.set(key, block);
+      else { changed.set(key, block); patched.delete(key); }
+    }
+    for (const patch of delta.patched || []) {
+      const key = keyOf(patch);
+      if (appended.has(key)) appended.set(key, { ...appended.get(key), ...patch });
+      else if (changed.has(key)) changed.set(key, { ...changed.get(key), ...patch });
+      else patched.set(key, { ...patched.get(key), ...patch });
+    }
+    for (const block of delta.append) {
+      const key = keyOf(block);
+      appended.set(key, block);
+      changed.delete(key); patched.delete(key);
+    }
   };
+  take(a);
+  take(b);
+  const removed = [...new Set([...(a.removed || []), ...(b.removed || [])])];
+  const merged = { ...a, ...b, append: [...appended.values()], changed: [...changed.values()] };
+  delete merged.patched;
+  delete merged.removed;
+  if (patched.size) merged.patched = [...patched.values()];
+  if (removed.length) merged.removed = removed;
   return { ...incoming, args: [merged, ...incoming.args.slice(1)] };
 }
 
@@ -115,14 +149,32 @@ class ClientQueue {
     // The payload is retained so a later item sharing this key can be MERGED
     // into it rather than replacing it.
     if (key) {
-      const at = this.items.findIndex((item) => item.key === key);
-      if (at >= 0) {
-        const combined = mergePayloads(channel, this.items[at].payload, payload);
+      const slot = this.items.find((item) => item.key === key);
+      if (slot) {
+        const combined = mergePayloads(channel, slot.payload, payload);
         if (combined) {
           const mergedText = JSON.stringify(combined);
           const mergedBytes = Buffer.byteLength(mergedText);
-          this.bytes += mergedBytes - this.items[at].bytes;
-          this.items[at] = { channel, text: mergedText, bytes: mergedBytes, key, payload: combined };
+          // THE CAP HOLDS AFTER A MERGE TOO (2026-10-21 audit). This path used
+          // to return true before any bound was checked, so one slot could
+          // grow without limit (a 1 KiB queue held 18.5 KB in one merged
+          // delta). Frames go first, as below; then the empty-queue exception
+          // admits one oversized PAYLOAD, never an oversized backlog built by
+          // merging: alone, the slot may be as large as the incoming payload
+          // by itself and no larger. Otherwise it is refused, which closes the
+          // client once with 1013 and its reconnect gets a fresh snapshot.
+          while (this.bytes - slot.bytes + mergedBytes > this.maxBytes) {
+            const frame = this.items.findIndex((item) => item.channel === 'terminal:frame');
+            if (frame < 0) break;
+            this.bytes -= this.items[frame].bytes;
+            this.items.splice(frame, 1);
+            this.noteDrop();
+          }
+          const fits = this.bytes - slot.bytes + mergedBytes <= this.maxBytes;
+          const aloneAndNoBigger = this.items.length === 1 && mergedBytes <= bytes;
+          if (!fits && !aloneAndNoBigger) return false;
+          this.bytes += mergedBytes - slot.bytes;
+          this.items[this.items.indexOf(slot)] = { channel, text: mergedText, bytes: mergedBytes, key, payload: combined };
           this.coalesced += 1;
           return true;
         }
@@ -177,6 +229,12 @@ class ClientQueue {
     this.droppedFrames += 1;
     this.logger.warn(`harbor-server: client ${this.clientId} dropped terminal frames: ${this.droppedFrames}`);
   }
+}
+
+// One log line per failure, never a wall: a reason is clipped so a hostile or
+// garbled frame cannot write an arbitrarily long line into server.log.
+function boundedReason(error) {
+  return String(error?.message || error).replace(/\s+/g, ' ').slice(0, 200);
 }
 
 function requestToken(request) {
@@ -337,6 +395,10 @@ function createWebSocketTransport({
   resolveSelfOriginHosts = null,
   selfOriginHostsTtlMs = SELF_ORIGIN_HOSTS_TTL_MS,
   selfOriginHostsEmptyTtlMs = SELF_ORIGIN_HOSTS_EMPTY_TTL_MS,
+  // (clientId, channel, args) => boolean: whether this client wants this
+  // push at all. Absent means every client gets every push, as before; the
+  // composition uses it to send each transcript only to the clients holding it.
+  deliverPush = null,
 }) {
   const wss = new WebSocketServer({ noServer: true });
   let nextClient = 0;
@@ -349,6 +411,15 @@ function createWebSocketTransport({
 
   const upgrade = (request, socket, head) => {
     if (new URL(request.url, 'http://harbor.local').pathname !== path) { socket.destroy(); return; }
+    // The http server drops its own socket error listener when it hands over an
+    // upgrade, and the origin check below awaits before ws attaches one, so a
+    // client resetting mid-handshake would be an unhandled 'error' that kills
+    // the whole server. Guard the gap, then hand the socket to ws.
+    const onHandshakeError = (error) => {
+      logger.warn?.(`harbor-server: websocket handshake socket error: ${boundedReason(error)}`);
+      socket.destroy();
+    };
+    socket.on('error', onHandshakeError);
     // Bound host/port and MagicDNS hosts are both read fresh off live state
     // rather than captured once at transport creation: `listen()` runs AFTER
     // this function returns (composeServer builds the transport, then the
@@ -366,6 +437,8 @@ function createWebSocketTransport({
         socket.destroy();
         return;
       }
+      if (socket.destroyed) return;
+      socket.off('error', onHandshakeError);
       wss.handleUpgrade(request, socket, head, (ws) => wss.emit('connection', ws, request));
     })().catch((error) => {
       logger.warn?.(`harbor-server: websocket upgrade failed: ${error?.message || error}`);
@@ -373,8 +446,24 @@ function createWebSocketTransport({
     });
   };
   server.on('upgrade', upgrade);
+  // An EventEmitter 'error' with no listener throws, and here that would end
+  // every phone's connection at once. Logged, never fatal.
+  wss.on('error', (error) => logger.warn?.(`harbor-server: websocket server error: ${boundedReason(error)}`));
   wss.on('connection', (ws, request) => {
     const clientId = `${request.socket.remoteAddress || 'unknown'}#${++nextClient}`;
+    // ONE BAD FRAME ENDS ONE CONNECTION, NOT THE SERVER (2026-10-21 audit). The
+    // ws receiver emits 'error' for a protocol violation (an unmasked or
+    // oversized frame, invalid UTF-8), and with no listener that error
+    // terminated node: a two-byte invalid frame from any client dropped every
+    // phone and cost a full restart. Said once, bounded, and only this socket
+    // goes; its 'close' runs the usual teardown below.
+    let socketFailed = false;
+    ws.on('error', (error) => {
+      if (socketFailed) return;
+      socketFailed = true;
+      logger.warn?.(`harbor-server: client ${clientId} socket error, closing it: ${boundedReason(error)}`);
+      ws.terminate();
+    });
     // Either proof of identity is sufficient, and the tailnet one is checked on
     // the UPGRADE request because that is where this socket's identity is
     // decided; `tailscale serve` stamps it there as well as on plain GETs.
@@ -431,6 +520,7 @@ function createWebSocketTransport({
       pump();
     };
     const unsubscribe = router.onPush((channel, ...args) => {
+      if (deliverPush && !deliverPush(clientId, channel, args)) return;
       enqueue(channel, { type: 'push', channel, args }, coalesceKey(channel, args));
     });
     // ONE teardown path for every way a client can leave: a clean close, a

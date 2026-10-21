@@ -203,6 +203,8 @@
 }
 
 .mtask-check::before, .mtask-star::before { border: 1px solid var(--ln); border-radius: 50%; content: ''; inset: 7px; position: absolute; }
+.mtask-check::before { border: 1.5px solid var(--ln2); inset: 10px; }
+.mtask-check.on::before { border-color: var(--live); background: rgba(36, 178, 124, 0.18); }
 
 .mtask-check.on {
   border-color: var(--live);
@@ -272,11 +274,15 @@
   padding: var(--space-2) var(--space-4) 0;
 }
 
+/* A legend, not a control: drawn as pills they looked tappable and did nothing
+   (2026-10-21 review). A colour dot, the name and the count. */
 .tasks-list-chip {
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-pill);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: color-mix(in srgb, var(--tag-color) 18%, transparent);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: var(--space-1) var(--space-2) var(--space-1) 0;
+  border: 0;
+  background: none;
   color: var(--sub);
   font-size: 12px;
   min-height: var(--touch-min);
@@ -310,4 +316,12 @@
   background: transparent;
   color: var(--sub);
   font-size: 20px;
+}
+
+.tasks-list-chip::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tag-color);
 }

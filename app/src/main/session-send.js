@@ -912,8 +912,17 @@ function createSessionSend(deps) {
   // /model or /effort command has already been submitted. This is deliberately
   // separate from assertComposerSafe: that guard protects text before send;
   // this narrowly-scoped handler resolves only Claude's known switch prompt.
+  //
+  // The pane WRAPS that sentence wherever its width falls (2026-10-21, Claude
+  // Code 2.1.303 at 120 columns: "...gets re-read" / "on your next message." in
+  // one session, "...re-read on" / "your next message." in another), and the
+  // match used to require it on one line, so both of Pat's effort changes that
+  // morning stopped on the raw-screen panel. The screen is matched with its
+  // whitespace collapsed, and the dialog's own title and answer pair are
+  // accepted as well, so a reworded explanation does not break it either.
   const SWITCH_COMMAND_RE = /^\/(model|effort)(?:\s|$)/i;
-  const SWITCH_CONFIRM_RE = /Switching to[^\n]*means the full history gets re-read on your next message\.[\s\S]{0,240}?1\.\s*Yes[\s\S]{0,120}?2\.\s*No/i;
+  const SWITCH_CONFIRM_RE = /Switching to .*? means the full history gets re-read on your next message\..{0,240}?1\.\s*Yes.{0,120}?2\.\s*No|Change (?:effort level|model)\?.{0,600}?1\.\s*Yes, switch to.{0,120}?2\.\s*No, go back/i;
+  const showsSwitchConfirm = (screen) => SWITCH_CONFIRM_RE.test(String(screen || '').replace(/\s+/g, ' '));
 
   const resolveClaudeSwitchConfirm = async (paneId, workspaceId, text, provider) => {
     if (provider !== 'claude' || !SWITCH_COMMAND_RE.test(String(text || '').trim())) return false;
@@ -923,7 +932,7 @@ function createSessionSend(deps) {
       if (attempt > 0) await sleep(500);
       let screen = '';
       try { screen = await readPane(paneId); } catch { continue; }
-      if (!SWITCH_CONFIRM_RE.test(screen)) continue;
+      if (!showsSwitchConfirm(screen)) continue;
       dialogSeen = true;
       await typeInto(paneId, workspaceId, '1');
       await typeInto(paneId, workspaceId, '\r');
@@ -935,7 +944,7 @@ function createSessionSend(deps) {
       if (attempt > 0) await sleep(250);
       try {
         const screen = await readPane(paneId);
-        if (!SWITCH_CONFIRM_RE.test(screen)) return true;
+        if (!showsSwitchConfirm(screen)) return true;
       } catch { /* keep verifying until the bounded retry is exhausted */ }
     }
     throw new Error('could not confirm the Claude model/effort switch; answer the open dialog via the >_ terminal');

@@ -630,3 +630,39 @@ test('a stale review above a working turn is not a dialog, even with a queued ec
   const withProse = `${review}\n  ❯ queued follow-up\nSome reply prose at the margin\n`;
   assert.equal(parseMenu(withProse), null, 'prose at the margin under the echo means the review is history');
 });
+
+// Claude Code 2.1.303's cache warning after /effort (Pat, 2026-10-21): no
+// footer, a "▔" top edge, and an explanation the 120-column pane wraps at a
+// different word in each capture. It fell to the raw-screen panel as an
+// "unrecognized prompt"; it is a plain two-choice question.
+for (const [fixtureName, level] of [['claude-2.1.303-effort-xhigh-120.txt', 'xhigh'], ['claude-2.1.303-effort-high-120.txt', 'high']]) {
+  test(`parseMenu reads the effort-switch cache warning from ${fixtureName}`, () => {
+    const screen = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch', fixtureName), 'utf8');
+    const menu = parseMenu(screen);
+    assert.ok(menu, 'the dialog parses');
+    assert.deepEqual(
+      menu.options.map(({ index, label, selected }) => ({ index, label, selected })),
+      [
+        { index: 1, label: `Yes, switch to ${level}`, selected: true },
+        { index: 2, label: 'No, go back', selected: false },
+      ],
+    );
+    assert.equal(menu.selectedIndex, 0);
+    assert.match(menu.question, /^Change effort level\? /, 'the question starts at the dialog, not the status line above it');
+    assert.ok(menu.question.endsWith(`Switching to ${level} means the full history gets re-read on your next message.`), menu.question);
+    assert.doesNotMatch(menu.question, /▔|done \d/);
+    // The paragraphs the CLI drew, so a card can title the question instead of
+    // running "...more tokens This conversation..." together.
+    assert.deepEqual(menu.questionParagraphs, [
+      'Change effort level?',
+      'Your next response will be slower and use more tokens',
+      `This conversation is cached for the current effort level. Switching to ${level} means the full history gets re-read on your next message.`,
+    ]);
+  });
+}
+
+test('an answered effort-switch warning above a composer is history, not a question', () => {
+  const screen = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch/claude-2.1.303-effort-high-120.txt'), 'utf8');
+  const answered = `${screen}\n${'─'.repeat(120)}\n❯ \n${'─'.repeat(120)}\n`;
+  assert.equal(parseMenu(answered), null);
+});

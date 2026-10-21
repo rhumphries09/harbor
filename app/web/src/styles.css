@@ -38,6 +38,19 @@ input {
   font: inherit;
 }
 
+/* iOS ZOOMS THE PAGE INTO A FIELD WHOSE TEXT IS UNDER 16PX when it takes focus,
+   and leaves it zoomed (2026-10-21 review: session search, notes search, the
+   note title, body and tags, and the new-session select were 13 to 15px). On a
+   phone that is the screen lurching sideways the moment you tap to type. Scoped
+   to iOS so the desktop-sized controls elsewhere keep their type scale. */
+@supports (-webkit-touch-callout: none) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  textarea,
+  select {
+    font-size: max(16px, 1em) !important;
+  }
+}
+
 /* No scrollbars anywhere. This is a phone: every scrolling surface in the app
    was drawing Chromium's desktop scrollbar, a light grey slab down the right
    edge of the conversation and a horizontal one under the task filters, which
@@ -82,10 +95,12 @@ input {
   height: var(--app-h, 100%);
   width: var(--app-w, 100%);
   min-height: 0;
+  /* No bottom inset here: the bottom tab bar is the last thing in the column
+     and owns the home-bar inset, and while typing the keyboard covers it. */
   padding:
     var(--safe-top)
     var(--safe-right)
-    var(--safe-bottom)
+    0
     var(--safe-left);
 }
 
@@ -95,70 +110,32 @@ input {
 }
 
 .app-header {
+  position: relative;
+  z-index: 30;
   flex: 0 0 auto;
-  padding: 6px 10px 6px 6px;
-  background: var(--glass-panel);
+  padding: 2px 4px 0 4px;
+  background: var(--bg);
   border-bottom: 1px solid var(--ln);
 }
 
-/* The header carries FIVE things (icon, project, title, state, chevron) plus
-   the capability chips plus settings, and at 430px that does not fit on one
-   line: measured, the session title got 118px while it needed 526px, so it
-   rendered as "Harbor handof…" and there was no way to read the rest. A title
-   attribute is not a recovery on a touch device, where nothing hovers.
-
-   Same answer the desktop window header reached at high grid densities: the
-   identity keeps a line to itself and the CHIPS MOVE AS A UNIT to a second
-   line. Nothing shrinks to nothing, and nothing is hidden.
-
-   The breakpoint is measured, not guessed: the chips need ~150px and settings
-   44px, so below ~620px the title is left with under half the bar, which is
-   where it starts losing whole words. Landscape (932px) stays one line. */
+/* Row one: the session (icon, project, title, state, chevron), the connection
+   pill when there is something to say, and settings. The capability chips moved
+   to the facts strip below (shell.css .hdr-strip, 2026-10-21), which gives the
+   title the whole row: about 290px at 430, two lines when it needs them, so a
+   long title is named, not hinted at (the 2026-08 "Harbor handof…" rule). */
 .header-top {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+  gap: 2px;
+  min-width: 0;
 }
 
-@media (max-width: 619px) {
-  .header-top > .hdr-session {
-    flex: 1 1 100%;
-    order: 1;
-  }
-
-  /* Row two: the chips and settings, as a unit. `order` keeps settings at the
-     end regardless of DOM position. */
-  .header-top > .hdr-cap-actions {
-    order: 2;
-    flex: 1 1 auto;
-  }
-
-  .header-top > .hdr-settings {
-    order: 3;
-    margin-left: auto;
-  }
-
-  /* The identity row gives back its own vertical padding to pay for the chip
-     row, but NOT its tap target: 44px is the floor, and dropping to 42 here is
-     exactly the kind of trade the measurement catches. */
-  .header-top > .hdr-session {
-    min-height: 44px;
-    padding-top: 0;
-    padding-bottom: 0;
-  }
-
-  /* With a row of its own the title can do what the session browser already
-     does with the same string: clamp to two lines instead of one. A 72
-     character title needs 526px and one line gives it 316, so a whole second
-     line is the difference between naming the session and hinting at it. */
-  .header-top > .hdr-session .hdr-title {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    white-space: normal;
-    line-height: 1.25;
-  }
+.header-top > .hdr-session .hdr-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  line-height: 1.25;
 }
 
 .bottom-nav button:focus-visible,
@@ -181,7 +158,7 @@ input {
   align-items: center;
   gap: 10px;
   min-height: 48px;
-  padding: 5px 8px;
+  padding: 4px 6px;
   border: 0;
   border-radius: 14px;
   background: transparent;
@@ -197,9 +174,9 @@ input {
 .hdr-session .project-icon,
 .hdr-session .project-dot {
   flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
 }
 
 .hdr-id {
@@ -290,28 +267,6 @@ input {
   font-weight: 600;
 }
 
-.connection-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 2px 6px 6px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  font-size: 13px;
-}
-
-.connection-banner.offline {
-  background: rgba(217, 138, 138, 0.14);
-  color: #f0b0b0;
-}
-
-.connection-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
 .search-row {
   margin-top: 10px;
 }
@@ -335,7 +290,7 @@ input {
   -webkit-overflow-scrolling: touch;
 }
 
-.offline-panel,
+
 .load-error,
 .empty-state {
   margin: 16px;
@@ -680,7 +635,7 @@ code {
   z-index: 1;
   display: flex;
   flex-direction: column;
-  max-height: min(88vh, 780px);
+  max-height: min(calc(var(--app-h, 100dvh) * 0.88), 780px);
   border-radius: 18px 18px 0 0;
   border: 1px solid var(--ln);
   border-bottom: 0;
@@ -864,5 +819,5 @@ code {
 }
 
 .hdr-state-background { background: #75b9e8; }
-.mobile-background-state, .session-badge.background { color: #75b9e8; padding: 8px 12px; font-size: 12px; }
+.session-badge.background { color: #75b9e8; padding: 8px 12px; font-size: 12px; }
 .session-dot.background, .session-status.background { background: #75b9e8; }

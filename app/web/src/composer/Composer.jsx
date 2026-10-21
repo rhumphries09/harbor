@@ -14,6 +14,23 @@ import { replyStore, useQuestionReply } from '../../../src/renderer/stage/use-qu
 import '../slash/slash.css';
 import '../voice/voice.css';
 
+// A draft outlives the screen (2026-10-21). iOS ends a backgrounded web app
+// whenever it likes, and a reconnect or a session switch remounts this
+// component, so a message typed on a bad connection was simply gone. One draft
+// per session, cleared when it is sent.
+const draftKey = (id) => `harbor-draft:${id}`;
+function readDraft(id) {
+  if (!id) return '';
+  try { return localStorage.getItem(draftKey(id)) || ''; } catch { return ''; }
+}
+function writeDraft(id, text) {
+  if (!id) return;
+  try {
+    if (text) localStorage.setItem(draftKey(id), text);
+    else localStorage.removeItem(draftKey(id));
+  } catch { /* storage full or blocked: the draft lives only in memory */ }
+}
+
 function insertSlashCommand(text, active, command) {
   if (!active || !command?.name) return text;
   const before = text.slice(0, active.start);
@@ -27,11 +44,24 @@ export function Composer({
   disabled,
   working = false,
   onSent,
+  // While the link is down the box stays open for typing (Pat typed a whole
+  // message during the 2026-10-21 outage); only the send waits, and says so.
+  offline = false,
 }) {
   const questionReply = useQuestionReply(sessionId);
   const currentSession = useRef(sessionId);
   currentSession.current = sessionId;
-  const [text, setText] = useState('');
+  const [text, setText] = useState(() => readDraft(sessionId));
+  const draftSession = useRef(sessionId);
+  useEffect(() => {
+    // A different session in the same mount starts from that session's draft.
+    if (draftSession.current !== sessionId) {
+      draftSession.current = sessionId;
+      setText(readDraft(sessionId));
+      return;
+    }
+    writeDraft(sessionId, text);
+  }, [sessionId, text]);
   const [focused, setFocused] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [formatOpen, setFormatOpen] = useState(() => {
@@ -100,16 +130,28 @@ export function Composer({
   if (!sessionId) return null;
 
   const submit = async () => {
-    if (disabled || sending || uploading || (!text.trim() && attachments.length === 0)) return;
+    if (disabled || offline || sending || uploading || (!text.trim() && attachments.length === 0)) return;
     const images = attachments.map((attachment) => attachment.path);
     const sentSessionId = sessionId;
+    const sentText = text;
     const result = await send(text, images);
     if (currentSession.current !== sentSessionId) return;
     if (result.ok) {
-      setText('');
+      // Clear only what was sent: anything typed while the send was in flight
+      // is a new draft, and wiping it (and its saved copy) lost words that
+      // were never sent (2026-10-21, second review).
+      setText((current) => (current === sentText ? '' : current));
       clearPaths(images);
       setSlashDismissed(false);
     }
+  };
+
+  // A tap on the composer's own buttons leaves focus in the text box: moving it
+  // to the button ended typing mode mid-tap, the tabs came back, the layout
+  // jumped 90px and the first tap on Send was lost (2026-10-21, second review).
+  // It also keeps the keyboard up for the next message.
+  const keepFocus = (event) => {
+    if (document.activeElement === textareaRef.current) event.preventDefault();
   };
 
   const pickSlash = (command) => {
@@ -158,8 +200,11 @@ export function Composer({
           {status.detail}
         </p>
       ) : null}
+      {offline && (text.trim() || attachments.length) ? (
+        <p className="composer-status waiting" role="status">Waiting for the connection. Your message stays here; send it once Harbor is back.</p>
+      ) : null}
       {attachmentError ? <p className="composer-status error" role="alert">{attachmentError}</p> : null}
-      {capsError ? <p className="composer-status error" role="alert">{capsError}</p> : null}
+      {capsError && !offline ? <p className="composer-status error" role="alert">{capsError}</p> : null}
       {voiceState.message ? (
         <p className={`voice-status ${voiceState.phase === 'error' ? 'error' : ''}`} role="status">{voiceState.message}</p>
       ) : null}
@@ -171,7 +216,7 @@ export function Composer({
         <div className={`composer-strip${attachments.length ? ' has-chips' : ''}`}>
           <AttachChips attachments={attachments} onRemove={remove} />
           {paneId && working ? (
-            <button type="button" className="composer-interrupt" onClick={interrupt}>
+            <button type="button" className="composer-interrupt" onPointerDown={keepFocus} onClick={interrupt}>
               <span className="composer-interrupt-glyph" aria-hidden="true" />
               Stop
             </button>
@@ -243,6 +288,7 @@ export function Composer({
         <button
           type="button"
           className={`composer-plus${toolsOpen ? ' on' : ''}`}
+          onPointerDown={keepFocus}
           aria-label={toolsOpen ? 'Hide composer tools' : 'Show composer tools'}
           aria-expanded={toolsOpen}
           onClick={() => setToolsOpen((v) => !v)}
@@ -291,7 +337,8 @@ export function Composer({
         <button
           type="button"
           className="composer-send"
-          disabled={disabled || sending || uploading || (!text.trim() && attachments.length === 0)}
+          onPointerDown={keepFocus}
+          disabled={disabled || offline || sending || uploading || (!text.trim() && attachments.length === 0)}
           onClick={submit}
           aria-label={sending ? 'Sending' : questionReply ? "Reply to Claude's questions" : 'Send'}
           title={questionReply ? "Reply to Claude's questions" : 'Send to this session'}

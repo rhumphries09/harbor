@@ -19,7 +19,7 @@ const VIEWS = [
 const EMPTY_COPY = {
   myday: {
     title: 'My Day is clear',
-    hint: 'Add something below, or star a task and it will land here tomorrow.',
+    hint: 'Add something with the box above, or star a task and it will land here tomorrow.',
   },
   important: {
     title: 'Nothing starred yet',
@@ -31,7 +31,7 @@ const EMPTY_COPY = {
   },
   all: {
     title: 'No tasks yet',
-    hint: 'Capture one below — it stays yours, not rewritten by anyone else.',
+    hint: 'Capture one with the box above. It stays yours, not rewritten by anyone else.',
   },
   completed: {
     title: 'Nothing finished yet',
@@ -51,9 +51,13 @@ function TaskRow({ row, showMyDay, onToggleDone, onToggleStar }) {
         type="button"
         className={`mtask-check${task.done ? ' on' : ''}`}
         aria-label={task.done ? `Mark ${task.title} not done` : `Mark ${task.title} done`}
+        aria-pressed={task.done}
         onClick={() => onToggleDone(task)}
       >
-        ✓
+        {/* An open task is an empty ring; only a done task carries the tick
+            (2026-10-21 review: every open task showed a faint check, so the
+            state took a second look to read). */}
+        {task.done ? '✓' : null}
       </button>
       <div className="mtask-main">
         <span className="mtask-title">{task.title}</span>

@@ -9,6 +9,7 @@ const {
   createArtifactsProvider,
   createServeAllowlist,
   extractCandidates,
+  barePaths,
   artifactKind,
   isExcluded,
 } = require('../../src/main/providers/artifacts.js');
@@ -90,6 +91,54 @@ test('extractCandidates ignores base64 payloads and non-viewable extensions', ()
   const b64 = 'aGVsbG8vd29ybGQ+cGF0aHMvZmFrZQ=='.repeat(20);
   const raw = JSON.stringify({ data: b64, other: '/home/you/dev/x/notes.txt' });
   assert.deepEqual(extractCandidates(raw), []);
+});
+
+// THE 18.5 S STALL (2026-10-21 audit). The bare shape was one regex over the
+// raw line, and a '/'-rich run with no extension made it rescan the rest of the
+// run from every later '/'. A 1.3 MB pasted screenshot's base64 record held
+// harbor-server's event loop for 18.5 s and found nothing. Two sides: the new
+// tokenizer answers exactly what that regex answered (the oracle below IS the
+// old pattern), and it answers in linear time.
+const OLD_BARE_PATH_RE = /(?:\/[^\/\0"'\\\s]+)+\.(?:html?|png|jpe?g|gif|webp|svg|pdf|mp4|webm)\b/gi;
+
+test('the bare-path tokenizer finds exactly what the old single regex found', () => {
+  let seed = 20261021;
+  const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  const pieces = ['/', '/', '//', 'a', 'Bc', '9', '.', '.png', '.PNG', '.html', '.htm', '.htmlx', '.jpeg', 'x.pdf',
+    '.mp4', '-', '_', ' ', '"', "'", '\\', ':', 'C:', '\0', '\n', 'file:///', 'https://', '+', '=', 'é'];
+  for (let i = 0; i < 6000; i += 1) {
+    let s = '';
+    const n = Math.floor(rand() * 24);
+    for (let j = 0; j < n; j += 1) s += pieces[Math.floor(rand() * pieces.length)];
+    assert.deepEqual(barePaths(s), [...s.matchAll(OLD_BARE_PATH_RE)].map((m) => m[0]), JSON.stringify(s));
+  }
+});
+
+test('a slash-rich base64 image record is scanned in linear time, and a path beside it is still found', () => {
+  // The audit's shape: a '/' every 64 characters and never a '.'. 1 MiB took
+  // the old regex about 11 s.
+  const data = `${'A'.repeat(63)}/`.repeat(16 * 1024);
+  const record = JSON.stringify({ type: 'user', message: { content: [
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data } },
+    { type: 'text', text: 'saved it to /home/you/dev/demo/out/report.png for you' },
+  ] } });
+  const started = performance.now();
+  const found = extractCandidates(record);
+  const elapsed = performance.now() - started;
+  assert.deepEqual(found, ['/home/you/dev/demo/out/report.png']);
+  assert.ok(elapsed < 1000, `1 MiB of slash-rich base64 took ${Math.round(elapsed)} ms`);
+});
+
+test('slash-rich text that is not base64 reaches the tokenizer and is linear too', () => {
+  // '-' breaks every base64 run, so the blob filter leaves this alone and the
+  // tokenizer itself must be linear. 256 KiB took the old regex about 5 s.
+  const text = 'seg-ment/'.repeat(29_000);
+  const raw = JSON.stringify({ type: 'tool_result', content: `${text} then C:/dev/x/final.pdf` });
+  const started = performance.now();
+  const found = extractCandidates(raw);
+  const elapsed = performance.now() - started;
+  assert.deepEqual(found, ['C:/dev/x/final.pdf']);
+  assert.ok(elapsed < 1000, `256 KiB of extensionless segments took ${Math.round(elapsed)} ms`);
 });
 
 test('exclusion rules: build output, VCS, caches, config homes, scratchpads', () => {

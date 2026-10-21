@@ -1,0 +1,14 @@
+● I finished the review. Two changes move to the next release because each rests on a single run, and the rest stay.    
+                                                                                                                        
+  The test runs that cover every passing result are queued, and I will report back when they finish.                    
+                                                                                                                        
+✻ Crunched for 54s · done 8:11 AM                                                                                       
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Change effort level?                                                                                                 
+   Your next response will be slower and use more tokens
+
+   This conversation is cached for the current effort level. Switching to xhigh means the full history gets re-read     
+   on your next message.                                                                                                
+
+   ❯ 1. Yes, switch to xhigh                                                                                            
+     2. No, go back

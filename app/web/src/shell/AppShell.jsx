@@ -26,8 +26,9 @@ import { NotesView } from '../notes/NotesView.jsx';
 import { useNotes } from '../notes/useNotes.js';
 import { buildBrowserRows } from '../browse/rows.js';
 import { useVisualViewport } from './use-visual-viewport.js';
+import { useTyping } from './use-typing.js';
 import { prettyModelId } from './model-label.js';
-import { SessionMeta } from './SessionMeta.jsx';
+import { SessionMeta, SessionStatus, useSessionFacts } from './SessionMeta.jsx';
 import { ErrorBoundary } from '../../../src/renderer/ErrorBoundary.jsx';
 import './shell.css';
 
@@ -43,12 +44,67 @@ function planLabel(session) {
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
-function connectionLabel(state, error) {
-  if (state === CONNECTION.connected) return 'Connected';
-  if (state === CONNECTION.connecting) return 'Connecting…';
-  if (state === CONNECTION.error) return error || 'Connection error';
-  return 'Disconnected';
+// CONNECTION STATE COSTS ONE PILL, NEVER HALF THE SCREEN (2026-10-21, Pat: "if
+// it disconnects then theres this massive fucking pinned header section that
+// takes up over half the screen"). A drop used to add a full-width banner row to
+// the header AND a "Cannot reach harbor-server" card above the conversation,
+// 340px together on a 932px phone, and with the keyboard up that pushed the box
+// he was typing in under the keyboard. The state now lives in a pill on the
+// header's identity row: "Reconnecting" for the first seconds, "Offline" after.
+// Tapping it retries at once and says why; the conversation, the list and the
+// typed text all stay where they are. The full-screen explanation is kept for the
+// one case where there is nothing else to show: a first start that has never
+// connected and has nothing cached.
+function ConnectionPill({ long, error, onRetry }) {
+  const [open, setOpen] = useState(false);
+  const label = long ? 'Offline' : 'Reconnecting';
+  return (
+    <div className="conn">
+      <button
+        type="button"
+        className={`conn-pill ${long ? 'is-offline' : 'is-reconnecting'}`}
+        aria-expanded={open}
+        aria-label={long ? 'Offline. Show details and retry' : 'Reconnecting. Show details'}
+        onClick={() => { setOpen((value) => !value); onRetry?.(); }}
+      >
+        <span className="conn-dot" aria-hidden="true" />
+        <span>{label}</span>
+      </button>
+      {open ? (
+        <div className="conn-pop" role="status">
+          <p className="conn-pop-title">{long ? 'Can’t reach Harbor on your PC' : 'Reconnecting to Harbor'}</p>
+          <p className="conn-pop-detail">
+            {long
+              ? 'Retrying on its own. Your conversation and anything you type stay here.'
+              : 'The phone dropped the connection; this usually takes a second or two.'}
+          </p>
+          {error ? <p className="conn-pop-reason">{error}</p> : null}
+          <div className="conn-pop-actions">
+            <button type="button" className="conn-pop-retry" onClick={() => onRetry?.()}>Retry now</button>
+            <button type="button" className="conn-pop-close" onClick={() => setOpen(false)}>Close</button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
+
+function OfflineScreen({ error, onRetry }) {
+  return (
+    <div className="conv-pane empty offline-screen" role="alert">
+      <span className="offline-mark" aria-hidden="true" />
+      <p className="conv-empty-title">Can’t reach Harbor on your PC</p>
+      <p className="conv-empty-hint">Check that Tailscale is on (with no exit node) and that Harbor is running on the PC. This screen retries on its own.</p>
+      {error ? <p className="offline-reason">{error}</p> : null}
+      <button type="button" className="btn-primary conv-pick" onClick={onRetry}>Retry now</button>
+    </div>
+  );
+}
+
+// The effort as the desktop's model chip badges it (MED, not "medium"), so the
+// facts strip has room for the status.
+const EFFORT_BADGE = { medium: 'med' };
+const PICKED_KEY = 'harbor-picked-session';
 
 function greeting(name) {
   const hour = new Date().getHours();
@@ -66,7 +122,7 @@ function NotesScreen({ client }) {
 // session identity now takes the whole bar and IS the control that opens the
 // browser, so switching sessions is a thumb-sized target instead of a 13px
 // text button in the corner.
-function SessionHeaderButton({ session, header, iconUrl, onOpenBrowse }) {
+function SessionHeaderButton({ session, header, facts, iconUrl, onOpenBrowse }) {
   const project = session?.project && session.project !== '~' ? session.project : 'home';
   const title = session ? (session.childTitle || session.title || 'Untitled session') : 'Choose a session';
   const cue = runStateCue(session, null, header);
@@ -76,10 +132,13 @@ function SessionHeaderButton({ session, header, iconUrl, onOpenBrowse }) {
       ? 'working'
       : session?.isLive ? 'live' : 'idle';
   return (
-    <button type="button" className="hdr-session" onClick={onOpenBrowse} aria-label="Switch session">
+    <button type="button" className="hdr-session" onClick={onOpenBrowse} aria-label={session ? `Switch session (now: ${title})` : 'Switch session'}>
       {session ? <ProjectIcon label={session.project} url={iconUrl} /> : null}
       <span className="hdr-id">
-        <span className="hdr-project">{session ? project : 'Harbor'}</span>
+        <span className="hdr-kicker">
+          <span className="hdr-project">{session ? project : 'Harbor'}</span>
+          {session ? <SessionStatus facts={facts} /> : null}
+        </span>
         <span className="hdr-title">{title}</span>
       </span>
       <span className={`hdr-state hdr-state-${state}`} title={cue?.tooltip || cue?.label} aria-label={cue?.ariaLabel} />
@@ -96,7 +155,7 @@ function ViewHeader({ view }) {
 }
 
 function SessionScreen({
-  client, session, onOpenBrowse, onHeader, accountName,
+  client, session, onOpenBrowse, onHeader, accountName, offline,
 }) {
   const asks = useHookAsks(client);
   const pendingAsk = asks.find(ask => ask.sessionId === session?.id && !ask.answered);
@@ -148,7 +207,8 @@ function SessionScreen({
 
   return (
     <section className="conv-pane shell-screen shell-screen-sessions">
-      {runStateCue(session, pane, header)?.kind === "background" ? <div className="mobile-background-state" role="status">{runStateCue(session, pane, header).label}</div> : null}
+      {/* Background work ("7 tasks running") is a status in the header strip
+          now, not a row of its own above the conversation. */}
       <Conversation
         blocks={blocks}
         header={header}
@@ -156,7 +216,21 @@ function SessionScreen({
         empty={empty}
       />
       {pane && !subSessionReadOnly(session) && session.provider === 'claude' ? (
-        pendingAsk ? <HookPrompt client={client} ask={pendingAsk} /> : <AskCard client={client} pane={pane} sessionId={session.id} blockedHint={blockedHint} />
+        // ONE FOLD FOR EVERY QUESTION SURFACE (2026-10-21). While the composer
+        // has the keyboard, whatever is asking (a parsed card, a hook form, a
+        // permission card, the raw-screen fallback) folds to this one bar so
+        // the text being typed keeps the screen; Answer puts the keyboard away
+        // and the full surface returns. Per-card folds missed the hook and
+        // fallback renderers (second review). shell.css draws the bar only
+        // when a surface is actually present.
+        <div className="question-dock">
+          <div className="question-fold">
+            <span className="question-fold-badge" aria-hidden="true">✳</span>
+            <span className="question-fold-text">Claude is asking you something</span>
+            <button type="button" className="question-fold-open" onClick={() => document.activeElement?.blur?.()}>Answer</button>
+          </div>
+          {pendingAsk ? <HookPrompt client={client} ask={pendingAsk} /> : <AskCard client={client} pane={pane} sessionId={session.id} blockedHint={blockedHint} />}
+        </div>
       ) : null}
       <Composer
         sessionId={session.id}
@@ -164,6 +238,7 @@ function SessionScreen({
         disabled={subSessionReadOnly(session)}
         working={Boolean(header?.working)}
         onSent={() => {}}
+        offline={offline}
       />
     </section>
   );
@@ -171,6 +246,8 @@ function SessionScreen({
 
 export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
   useVisualViewport();
+  const shellRef = useRef(null);
+  const typing = useTyping(shellRef);
 
   const [connection, setConnection] = useState(CONNECTION.disconnected);
   const [connectionError, setConnectionError] = useState(null);
@@ -254,7 +331,23 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
     return map;
   }, [model]);
 
-  const activeSession = activeId ? sessionsById.get(activeId) : null;
+  // A SESSION PICKED FROM SEARCH OPENS (2026-10-21 review, finding 16). The
+  // list the shell holds is the phone's 48-hour projection, so a row the
+  // drawer found in 7d, 30d, All or search was missing from it and the pick
+  // landed on "Choose a session". The picked row is kept (and survives a
+  // reload) as the fallback until the live list carries that session.
+  const [pickedSession, setPickedSession] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(PICKED_KEY) || 'null'); } catch { return null; }
+  });
+  const pickSession = useCallback((session) => {
+    if (!session?.id) return;
+    setPickedSession(session);
+    try { localStorage.setItem(PICKED_KEY, JSON.stringify(session)); } catch { /* memory only */ }
+    openSession(session.id);
+  }, [openSession]);
+  const activeSession = activeId
+    ? (sessionsById.get(activeId) || (pickedSession?.id === activeId ? pickedSession : null))
+    : null;
   const modelIdentity = activeHeader?.model?.id
     || activeSession?.model
     || activeHeader?.model?.label
@@ -283,6 +376,16 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
   }, [disconnected]);
   const hasCachedRail = Boolean(model?.projects?.length);
   const activePane = activeSession?.paneId ? { paneId: activeSession.paneId, workspaceId: activeSession.workspaceId || null } : null;
+  const activeCue = activeSession ? runStateCue(activeSession, activePane, activeHeader) : null;
+  const backgroundLabel = activeCue?.kind === 'background' ? activeCue.label : null;
+  // While the link is down every fact is last-known, and says so ("Last seen
+  // working"); the dots go grey in shell.css (2026-10-21 review, finding 6).
+  const factsHeader = disconnected && activeHeader ? { ...activeHeader, stale: true } : activeHeader;
+  const facts = useSessionFacts({ client, session: activeSession, header: factsHeader, pane: activePane, background: disconnected ? null : backgroundLabel });
+  const retryNow = useCallback(() => client?.reconnectNow?.(), [client]);
+  // The one case the full explanation is for: nothing cached and no session to
+  // show, so the screen would otherwise be an empty welcome that cannot work.
+  const coldOffline = disconnected && offlineLong && !hasCachedRail && !activeSession;
 
   const browserRows = useMemo(
     () => buildBrowserRows(model, { iconUrl }),
@@ -295,22 +398,28 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
   return (
     <RpcProvider client={client}>
       <div
+        ref={shellRef}
         className={`app-shell${disconnected ? ' is-disconnected' : ''}${browseOpen ? ' is-browsing' : ''}`}
         data-connection={disconnected ? 'offline' : 'online'}
+        data-typing={typing ? 'true' : 'false'}
       >
         <>
+            {/* TWO ROWS AT MOST, ONE WHILE TYPING (2026-10-21). Row one is
+                where you are (the session, which opens the switcher), the
+                connection pill when there is something to say, and settings.
+                Row two is one strip of facts and controls: model, plan,
+                context, status, cache. It used to be three rows (identity,
+                chips, facts) plus a banner row and an error card. */}
             <header className="app-header">
               <div className="header-top">
                 {view === 'chat' ? <SessionHeaderButton
                   header={activeHeader}
+                  facts={facts}
                   session={activeSession}
                   iconUrl={activeSession ? iconUrl(activeSession.project) : null}
                   onOpenBrowse={openBrowse}
                 /> : <ViewHeader view={view} />}
-                {view === 'chat' && activeSession ? <div className="hdr-cap-actions">
-                  <button type="button" disabled={subSessionReadOnly(activeSession)} className={`hdr-model-chip tier-${modelTier} effort-${visibleEffort || 'default'}`} onClick={() => setCapabilityOpen(true)} aria-label={`Model ${visibleModel}${visibleEffort ? `, effort ${visibleEffort}` : ''}`}>{compactModel}{visibleEffort ? ` · ${visibleEffort}` : ''}</button>
-                  <button type="button" className="hdr-plan-chip" onClick={() => setPlanOpen(true)} aria-label="Plan and usage" title={planLabel(activeSession)}>{planLabel(activeSession)}</button>
-                </div> : null}
+                {disconnected ? <ConnectionPill long={offlineLong} error={connectionError} onRetry={retryNow} /> : null}
                 <button
                   type="button"
                   className="btn-ghost hdr-settings"
@@ -331,41 +440,17 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                   </svg>
                 </button>
               </div>
-              {/* Connection state is silent while it is fine. A permanent green
-                  "Connected" bar spent a row telling Pat
-                  something that is true almost always; the shell carries it as
-                  a data attribute for anything that needs to read it, and the
-                  banner appears only when there is something to say. */}
               {view === 'chat' && activeSession ? (
-                <SessionMeta client={client} session={activeSession} header={activeHeader} pane={activePane} />
-              ) : null}
-              {disconnected && !offlineLong ? (
-                <div className="connection-banner reconnecting" role="status">
-                  <span className="connection-dot" aria-hidden="true" />
-                  <span>Reconnecting…</span>
-                </div>
-              ) : null}
-              {disconnected && offlineLong ? (
-                <div className="connection-banner offline" role="status">
-                  <span className="connection-dot" aria-hidden="true" />
-                  <span>{connectionLabel(connection, connectionError)}</span>
+                <div className="hdr-strip">
+                  <button type="button" disabled={subSessionReadOnly(activeSession)} className={`hdr-chip hdr-model-chip tier-${modelTier} effort-${visibleEffort || 'default'}`} onClick={() => setCapabilityOpen(true)} aria-label={`Model ${visibleModel}${visibleEffort ? `, effort ${visibleEffort}` : ''}`}><span className="hdr-chip-face">{compactModel}{visibleEffort ? <span className="hdr-chip-effort">{EFFORT_BADGE[visibleEffort] || visibleEffort}</span> : null}</span></button>
+                  <button type="button" className="hdr-chip hdr-plan-chip" onClick={() => setPlanOpen(true)} aria-label={`Plan ${planLabel(activeSession)} and usage`}><span className="hdr-chip-face">{planLabel(activeSession)}</span></button>
+                  <SessionMeta facts={facts} />
                 </div>
               ) : null}
             </header>
 
             <main className="app-main">
-              {disconnected && offlineLong ? (
-                <div className="offline-panel" role="alert">
-                  <p>Cannot reach harbor-server.</p>
-                  <p className="offline-detail">
-                    Check Tailscale and that harbor-server is running.
-                  </p>
-                  {connectionError ? (
-                    <p className="offline-detail offline-reason">{connectionError}</p>
-                  ) : null}
-                </div>
-              ) : null}
-              {loadError ? <div className="load-error" role="alert">{loadError}</div> : null}
+              {loadError && !disconnected ? <div className="load-error" role="alert">{loadError}</div> : null}
 
               <ErrorBoundary key={view === 'chat' ? `chat:${activeId || ''}` : view} name={view === 'tasks' ? 'Tasks' : view === 'notes' ? 'Notes' : 'Session'}>
               {/* The cached list (local-cache.js) can name a session on the very
@@ -374,12 +459,14 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                   boundary would hold that error after the client arrives
                   (caught in the 2026-10-11 cold-boot screenshot). The client
                   exists one effect later, so waiting for it costs nothing. */}
-              {view === 'chat' && client ? <SessionScreen
+              {view === 'chat' && coldOffline ? <OfflineScreen error={connectionError} onRetry={retryNow} /> : null}
+              {view === 'chat' && client && !coldOffline ? <SessionScreen
                 client={client}
                 session={activeSession}
                 onOpenBrowse={openBrowse}
                 onHeader={setActiveHeader}
                 accountName={planLabel(activeSession)}
+                offline={disconnected}
               /> : null}
               {view === 'tasks' ? <TasksView client={client} /> : null}
               {view === 'notes' ? <NotesScreen client={client} /> : null}
@@ -397,7 +484,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                 model={model}
                 rows={browserRows}
                 activeSessionId={activeId}
-                onPick={(session) => openSession(session.id)}
+                onPick={pickSession}
                 onClose={closeBrowse}
                 onNewSession={() => setNewSessionOpen(true)}
                 fetchSlice={fetchSlice}
@@ -422,6 +509,9 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
           open={settingsOpen}
           onClose={() => setSettingsOpen(false)}
           serverUrl={settings.serverUrl}
+          hasToken={Boolean(settings.token)}
+          connection={connection}
+          onRetry={retryNow}
           auth={auth}
           onRequestSetup={onRequestSetup}
           onSignOut={onSignOut}

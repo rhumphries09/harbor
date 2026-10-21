@@ -715,10 +715,12 @@ class TranscriptParser {
     let outputTokens = 0;
     for (const value of turn.outputs.values()) outputTokens += value;
     const endMs = Date.parse(ts);
-    turn.block.turnMeta = {
-      outputTokens,
-      durationMs: turn.startMs !== null && Number.isFinite(endMs) ? Math.max(0, endMs - turn.startMs) : null,
-    };
+    const durationMs = turn.startMs !== null && Number.isFinite(endMs) ? Math.max(0, endMs - turn.startMs) : null;
+    // A usage record that moves neither number changes nothing on screen, so
+    // it re-renders nothing and sends nothing.
+    const prior = turn.block.turnMeta;
+    if (prior && prior.outputTokens === outputTokens && prior.durationMs === durationMs) return;
+    turn.block.turnMeta = { outputTokens, durationMs };
     if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
   }
 
@@ -1290,6 +1292,23 @@ function createTranscriptProvider(options = {}) {
     }
   };
 
+  // Which images each block carried when it was last SENT (by reference: the
+  // parser replaces a block's images array whenever it adds one). A block whose
+  // images are still exactly those can go out as a metadata patch; anything
+  // else, including images attached after the block was sent, goes out whole.
+  const noteSentImages = (entry, payload) => {
+    if (Array.isArray(payload.replace)) {
+      entry.sentImages = new Map();
+      for (const block of payload.replace) if (block.images?.length) entry.sentImages.set(block.key, block.images);
+      return;
+    }
+    for (const key of payload.removed || []) entry.sentImages.delete(key);
+    for (const block of [...(payload.changed || []), ...(payload.append || [])]) {
+      if (block.images?.length) entry.sentImages.set(block.key, block.images);
+      else entry.sentImages.delete(block.key);
+    }
+  };
+
   const emitUpdate = (entry, payload) => {
     if (closed) return;
     const stat = entry.lastMtimeMs;
@@ -1328,6 +1347,7 @@ function createTranscriptProvider(options = {}) {
     const outgoing = entry.windowBlocks && Array.isArray(payload.replace)
       ? { ...payload, replace: payload.replace.slice(-entry.windowBlocks) }
       : payload;
+    noteSentImages(entry, outgoing);
     emitter.emit('update', {
       sessionId: entry.sessionId,
       header,
@@ -1486,11 +1506,35 @@ function createTranscriptProvider(options = {}) {
         emitUpdate(entry, { replace: blocks });
       } else {
         // Appended rows are the ones minted this read (seq is monotonic);
-        // changed rows are earlier action rows whose tool result just landed.
+        // changed rows are earlier action rows whose tool result just landed,
+        // and prompts whose turn tokens grew.
         const appended = blocks.filter((b) => Number(b.key.slice(1)) >= seqBefore);
-        const changed = blocks.filter((b) => changedKeys.has(b.key) && Number(b.key.slice(1)) < seqBefore);
         const removed = [...keysBefore].filter((key) => !currentKeys.has(key));
-        emitUpdate(entry, { append: appended, changed, ...(removed.length ? { removed } : {}) });
+        // A TOKEN TICK MUST NOT RESEND THE PROMPT'S IMAGE (2026-10-21 audit).
+        // Every assistant usage record re-marks the prompt that opened the
+        // turn, and a whole changed block carries its base64 images: one
+        // 130 KB screenshot prompt and twelve short replies sent 1.57 MB to
+        // the phone. A block whose images the client already holds goes in
+        // `patched` without them; the shared reducer merges a patch into the
+        // held block, keeping its images. Text-only blocks still go whole.
+        const changed = [];
+        const patched = [];
+        for (const block of blocks) {
+          if (!changedKeys.has(block.key) || Number(block.key.slice(1)) >= seqBefore) continue;
+          if (block.images?.length && entry.sentImages.get(block.key) === block.images) {
+            const patch = { ...block };
+            delete patch.images;
+            patched.push(patch);
+          } else {
+            changed.push(block);
+          }
+        }
+        emitUpdate(entry, {
+          append: appended,
+          changed,
+          ...(patched.length ? { patched } : {}),
+          ...(removed.length ? { removed } : {}),
+        });
       }
     } catch (error) {
       try { await handle?.close(); } catch { /* already closed */ }
@@ -1536,6 +1580,13 @@ function createTranscriptProvider(options = {}) {
     }
   };
 
+  // ONE INITIALIZATION PER SESSION (2026-10-21, second Sol review). The open
+  // map was checked, then the metadata lookup awaited, so two overlapping opens
+  // (a phone reconnecting while its old open was still resolving) each built an
+  // entry; the later one overwrote the map and the earlier one's watcher and
+  // poller ran on with nothing able to close them. An open that finds another
+  // still initializing waits for it, then takes a reference on that entry.
+  const initializing = new Map(); // sessionId -> promise of the first opener's result
   const openTranscript = async (sessionId, hints = {}) => {
     const existing = open.get(sessionId);
     if (existing) {
@@ -1544,6 +1595,21 @@ function createTranscriptProvider(options = {}) {
       emitUpdate(existing, { replace: existing.parser.blocks });
       return { ok: true, sessionId };
     }
+    const inFlight = initializing.get(sessionId);
+    if (inFlight) {
+      await inFlight.catch(() => null);
+      return openTranscript(sessionId, hints);
+    }
+    const first = initializeTranscript(sessionId, hints);
+    initializing.set(sessionId, first);
+    try {
+      return await first;
+    } finally {
+      if (initializing.get(sessionId) === first) initializing.delete(sessionId);
+    }
+  };
+
+  const initializeTranscript = async (sessionId, hints) => {
     let meta = null;
     try { meta = await getSessionMeta(sessionId); } catch { meta = null; }
     const provider = hints.provider || meta?.provider || 'claude';
@@ -1582,6 +1648,7 @@ function createTranscriptProvider(options = {}) {
       // every `replace` payload carries the full live block list. Set only
       // when `hints.window` was requested (MOBILE-3).
       windowBlocks: hints.window ? normalizeWindowBlocks(hints.window) : null,
+      sentImages: new Map(), // block key -> images array last sent (see noteSentImages)
     };
     open.set(sessionId, entry);
     // The learned window survives restarts: load it before the first read so

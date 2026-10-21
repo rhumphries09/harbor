@@ -1,11 +1,14 @@
-/* One active conversation fills the measured visual viewport. */
+/* One active conversation fills the measured visual viewport. The column is
+   header, main, bottom tabs: all three in normal flow, so nothing can be drawn
+   over the composer (2026-10-21: the tab bar was position:fixed to the layout
+   viewport while the shell followed the visual one, and with the keyboard up it
+   landed on top of the text being typed). */
 .app-shell .app-main {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding-bottom: var(--bottomnav-h);
 }
 
 .shell-screen {
@@ -20,8 +23,13 @@
 }
 
 .shell-drawer-layer {
+  /* The VISIBLE rectangle, like every sheet (use-visual-viewport.js): inset:0
+     is the layout viewport, which runs under the keyboard (2026-10-21). */
   position: fixed;
-  inset: 0;
+  top: var(--app-offset-top, 0px);
+  left: var(--app-offset-left, 0px);
+  width: var(--app-w, 100%);
+  height: var(--app-h, 100%);
   z-index: 60;
 }
 
@@ -45,9 +53,9 @@
   animation: shell-drawer-in var(--dur-base) var(--ease-out);
 }
 
-.hdr-view { flex: 1 1 auto; min-width: 0; padding: 0 var(--space-2); }
-.hdr-view-kicker { color: var(--sub); font-size: 11px; font-weight: 600; text-transform: uppercase; }
-.hdr-view h1 { font-size: 1.25rem; line-height: 1.2; margin: 0; }
+.hdr-view { flex: 1 1 auto; min-width: 0; min-height: 48px; display: flex; flex-direction: column; justify-content: center; padding: 0 var(--space-3); }
+.hdr-view-kicker { color: var(--fnt); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.hdr-view h1 { font-size: 1.2rem; line-height: 1.2; margin: 0; }
 
 .shell-drawer .session-browser {
   position: absolute;
@@ -59,60 +67,68 @@
   to { translate: 0 0; }
 }
 
-.shell-header-actions {
+/* ── Row two: the facts strip ────────────────────────────────────────────────
+   Model, plan, context, status and cache on ONE line under the identity row.
+   The two controls draw a 30px pill inside a 44px target (the negative margin
+   keeps the row 40px tall without shrinking what a thumb can hit). Status takes
+   what is left and ellipsizes; it never pushes cache off the edge. */
+.hdr-strip {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  min-height: 40px;
+  padding: 0 10px 4px 8px;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
-.shell-browse-btn {
-  min-width: 44px;
-  min-height: 44px;
-  padding: 8px 12px;
+.hdr-chip {
+  position: relative;
+  flex: 0 0 auto;
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
+  margin: -2px 0;
+  padding: 0;
   border: 0;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--sub);
-  font-size: 13px;
+  background: transparent;
+  color: var(--tx);
+  font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
 }
 
-/* The model chip was capped at max-width:92px while "Opus 5 · xhigh" needs 99,
-   so the one thing Pat has twice said he must be able to see rendered as
-   "Opus 5 · x…". And the plan chip was pinned to a 44px square, which is what
-   forced it to a single letter: the CSS and the JSX slice were enforcing each
-   other. Both now size to their content and share the row. */
-.hdr-cap-actions {
-  display: flex;
+.hdr-chip-face {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
-  flex: 0 1 auto;
-  min-width: 0;
-}
-
-.hdr-cap-actions button {
-  min-height: 44px;
-  min-width: 44px;
-  flex: 0 1 auto;
-  padding: 0 12px;
+  height: 30px;
+  padding: 0 11px;
   border: 1px solid var(--ln);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.11);
-  color: var(--tx);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.07);
 }
 
-.hdr-cap-actions .hdr-model-chip {
+.hdr-chip:active .hdr-chip-face { background: rgba(255, 255, 255, 0.14); }
+.hdr-chip:disabled { cursor: default; opacity: 0.6; }
+
+.hdr-chip-effort {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--sub);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.hdr-model-chip .hdr-chip-face {
   border-color: rgb(var(--ac-rgb) / 38%);
   background: rgb(var(--ac-rgb) / 14%);
 }
 .hdr-model-chip.tier-low { color: color-mix(in srgb, var(--ac) 58%, var(--sub)); }
-.hdr-model-chip.tier-medium { color: color-mix(in srgb, var(--ac) 82%, white); text-shadow: 0 0 8px rgb(var(--ac-rgb) / 38%); }
-.hdr-model-chip.tier-high { color: #dce7ff; text-shadow: 0 0 5px rgb(var(--ac-rgb) / 80%), 0 0 15px rgb(var(--ac-rgb) / 55%); }
-.hdr-cap-actions .hdr-plan-chip { background: rgba(255, 255, 255, 0.14); }
+.hdr-model-chip.tier-medium { color: color-mix(in srgb, var(--ac) 82%, white); }
+.hdr-model-chip.tier-high { color: #dce7ff; }
 
 .warm-empty { padding: var(--space-10) var(--space-5); }
 .conv-empty-eyebrow { margin: 0 0 var(--space-2); color: var(--ac); font-size: 11px; font-weight: 700; letter-spacing: .12em; }
@@ -127,25 +143,27 @@
   .shell-drawer { animation-duration: .01ms; }
 }
 
-/* Session facts under the header (2026-10-11): context, status, cache.
+/* Session facts in the strip (2026-10-11): context, status, cache.
    Colours follow the desktop rail (rail-status.cjs): working = accent blue,
    waiting on you = amber, idle and ready = live green, not running = grey.
    Static on purpose: Harbor status lights never animate. */
 .hdr-meta {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 24px;
-  padding: 2px calc(var(--space-2, 8px) + 4px) 6px;
+  min-width: 0;
+  margin-left: auto;
+  padding-left: 4px;
   font-size: 12.5px;
   color: var(--sub);
   overflow: hidden;
   white-space: nowrap;
 }
-.hdr-ctx { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+.hdr-ctx { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
 .hdr-ring {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
   background: conic-gradient(var(--ac) var(--pct), rgba(255, 255, 255, 0.14) 0);
   flex: 0 0 auto;
@@ -153,14 +171,33 @@
 .hdr-ctx.warn .hdr-ring { background: conic-gradient(var(--warn) var(--pct), rgba(255, 255, 255, 0.14) 0); }
 .hdr-ctx-num { color: var(--tx); font-weight: 600; font-variant-numeric: tabular-nums; }
 .hdr-ctx.warn .hdr-ctx-num { color: var(--warn); }
-.hdr-ctx-unit { color: var(--fnt); }
-.hdr-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.hdr-ctx-unit { color: var(--fnt); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+/* The project line carries the status: "CDT-APP  ● Waiting on you". */
+.hdr-kicker {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.hdr-kicker .hdr-project { flex: 0 1 auto; min-width: 2.5em; }
+.hdr-status {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--sub);
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
 .hdr-status::before {
   content: '';
   display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-right: 6px;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
   border-radius: 50%;
   vertical-align: 1px;
   background: var(--fnt);
@@ -171,23 +208,207 @@
 .hdr-status-blocked::before { background: var(--warn); }
 .hdr-status-idle::before { background: var(--live); }
 .hdr-status-off { color: var(--fnt); }
+.hdr-status-background { color: #75b9e8; }
+.hdr-status-background::before { background: #75b9e8; }
+.hdr-status-stale { color: var(--fnt); }
 .hdr-cache {
   flex: 0 0 auto;
-  margin-left: auto;
-  padding: 1px 8px;
+  padding: 2px 7px;
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--sub);
   font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
-.hdr-cache::before { content: 'cache '; color: var(--fnt); }
+.hdr-cache::before { content: 'cache '; color: var(--fnt); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
 .hdr-cache.cache-warm { color: var(--live); }
 .hdr-cache.cache-expired { color: var(--fnt); }
 
-.connection-banner.reconnecting {
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--sub);
+/* Disconnected: what the header shows is what was true when the link dropped,
+   so its state colours step back to grey instead of claiming a live session. */
+.app-shell.is-disconnected .hdr-state,
+.app-shell.is-disconnected .hdr-status::before {
+  background: var(--fnt);
+  box-shadow: none;
 }
-.connection-banner.reconnecting .connection-dot { background: var(--warn); }
-.hdr-status-stale { color: var(--fnt); }
+.app-shell.is-disconnected .hdr-status { color: var(--fnt); }
 
+/* ── Connection pill ─────────────────────────────────────────────────────────
+   Lives on row one, so a drop costs no height at all. Its details open as a
+   card OVER the content (absolutely positioned), never pushing it down. */
+.conn {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.conn-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--touch-min);
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--sub);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.conn-pill > span:last-child {
+  padding: 4px 0;
+}
+
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+.conn-pill.is-offline { color: var(--err); }
+.conn-pill.is-offline .conn-dot { background: var(--err); }
+
+.conn-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: -40px;
+  z-index: 40;
+  width: min(300px, calc(var(--app-w, 100vw) - 24px));
+  padding: var(--space-4);
+  border: 1px solid var(--ln2);
+  border-radius: var(--radius-lg);
+  background: #15171d;
+  box-shadow: var(--shadow-pop);
+  white-space: normal;
+}
+
+.conn-pop p { margin: 0; }
+.conn-pop-title { color: var(--tx); font-weight: 650; font-size: 15px; }
+.conn-pop-detail { margin-top: 6px !important; color: var(--sub); font-size: 13.5px; line-height: 1.45; }
+.conn-pop-reason { margin-top: 8px !important; color: var(--fnt); font-size: 12px; line-height: 1.4; }
+
+.conn-pop-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.conn-pop-actions button {
+  flex: 1 1 0;
+  min-height: var(--touch-min);
+  border: 0;
+  border-radius: var(--radius-md);
+  font-weight: 600;
+}
+
+.conn-pop-retry { background: var(--ac); color: #fff; }
+.conn-pop-close { background: rgba(255, 255, 255, 0.08); color: var(--tx); }
+
+/* The full explanation, only when there is nothing else to show. */
+.offline-screen {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-8) var(--space-6);
+  text-align: center;
+}
+
+.offline-screen .conv-empty-title { margin: var(--space-2) 0 0; font-size: 1.2rem; font-weight: 700; }
+.offline-screen .conv-empty-hint { max-width: 30ch; margin: 0; color: var(--sub); line-height: 1.45; }
+.offline-screen .conv-pick { width: auto; min-width: 180px; margin-top: var(--space-4); }
+
+.offline-mark {
+  width: 44px;
+  height: 44px;
+  border: 2px solid var(--err);
+  border-radius: 50%;
+  background:
+    linear-gradient(45deg, transparent calc(50% - 1px), var(--err) calc(50% - 1px), var(--err) calc(50% + 1px), transparent calc(50% + 1px));
+  opacity: 0.85;
+}
+
+.offline-reason {
+  max-width: 34ch;
+  margin: var(--space-1) 0 0;
+  color: var(--fnt);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* ── Typing: the screen belongs to the text (2026-10-21) ─────────────────────
+   While a field in the app holds focus (use-typing.js), the bottom tabs and the
+   facts strip step aside and the identity row tightens to one line, so with
+   the keyboard up the conversation and the box being typed in get the screen. */
+.app-shell[data-typing="true"] .bottom-nav,
+.app-shell[data-typing="true"] .hdr-strip,
+.app-shell[data-typing="true"] .hdr-kicker {
+  display: none;
+}
+
+.app-shell[data-typing="true"] .hdr-session {
+  min-height: 44px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.app-shell[data-typing="true"] .header-top > .hdr-session .hdr-title,
+.app-shell.is-disconnected .header-top > .hdr-session .hdr-title {
+  /* Typing: one line. Disconnected: the pill takes width from the title, and
+     a second title line would make a drop grow the header again. */
+  -webkit-line-clamp: 1;
+}
+
+/* The question dock (AppShell SessionScreen). Normally transparent; while the
+   composer has the keyboard and a question surface is present, that surface is
+   folded to one amber bar with an Answer button. A field INSIDE the surface
+   (a hook form's text answer) keeps it open: :focus-within. */
+.question-dock {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.question-fold { display: none; }
+
+.app-shell[data-typing="true"] .question-dock:not(:focus-within):has(> :not(.question-fold)) > .question-fold {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px 8px;
+  padding: 2px 4px 2px 12px;
+  border: 1px solid rgba(212, 165, 55, 0.4);
+  border-radius: var(--radius-pill);
+  background: #17140c;
+}
+
+.app-shell[data-typing="true"] .question-dock:not(:focus-within) > :not(.question-fold) {
+  display: none;
+}
+
+.question-fold-badge { color: var(--warn); }
+.question-fold-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #f0d48a;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.question-fold-open {
+  flex: 0 0 auto;
+  min-height: var(--touch-min);
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--warn);
+  color: #1a1408;
+  font-weight: 700;
+}

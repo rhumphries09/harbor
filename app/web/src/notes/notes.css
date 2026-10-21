@@ -16,7 +16,9 @@
 
 /* --- list header --- */
 .notes-top { flex: 0 0 auto; padding: var(--space-4) var(--space-4) var(--space-2); }
-.notes-h1 { margin: 0 0 var(--space-3); font-size: 2rem; font-weight: 700; letter-spacing: -0.01em; }
+/* The app header already says Notes; a second 2rem "Notes" pushed the list down
+   (2026-10-21 review). The heading stays for screen readers only. */
+.notes-h1 { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .notes-search {
   display: flex;
   align-items: center;
@@ -36,7 +38,7 @@
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding: 0 var(--space-4) calc(var(--space-10) + var(--safe-bottom));
+  padding: 0 var(--space-4) calc(var(--space-10) + 40px);
 }
 .notes-section {
   padding: var(--space-4) var(--space-1) var(--space-2);
@@ -101,7 +103,7 @@
 .notes-compose {
   position: absolute;
   right: var(--space-4);
-  bottom: calc(var(--space-4) + var(--safe-bottom));
+  bottom: var(--space-4);
   display: grid;
   place-items: center;
   width: 52px;
@@ -115,9 +117,15 @@
 .notes-compose:active { transform: scale(0.96); }
 
 /* --- editor: full-screen, seamless --- */
+/* Sized to the VISIBLE rectangle (use-visual-viewport.js), like every sheet:
+   inset:0 is the layout viewport, which with the keyboard up can run under it,
+   taking the editor's tag bar and the end of the note with it (2026-10-21). */
 .ne-screen {
   position: fixed;
-  inset: 0;
+  top: var(--app-offset-top, 0px);
+  left: var(--app-offset-left, 0px);
+  width: var(--app-w, 100%);
+  height: var(--app-h, 100%);
   z-index: 90;
   display: flex;
   flex-direction: column;
@@ -199,7 +207,9 @@
   -webkit-overflow-scrolling: touch;
   padding: var(--space-1) var(--space-4) var(--space-4);
 }
-.ne-title {
+/* Two classes deep: `.ne-screen input { font: inherit }` above outranked a
+   single class and flattened the title to body text (2026-10-21 review). */
+.ne-screen .ne-title {
   width: 100%;
   padding: var(--space-2) 0;
   border: 0;
@@ -211,10 +221,10 @@
   outline: 0;
 }
 .ne-title::placeholder { color: var(--fnt); }
-.ne-body {
+.ne-screen .ne-body {
   flex: 1 1 auto;
   width: 100%;
-  min-height: 40vh;
+  min-height: calc(var(--app-h, 100dvh) * 0.25);
   padding: var(--space-1) 0 var(--space-6);
   border: 0;
   background: transparent;
@@ -236,6 +246,10 @@
   padding: var(--space-2) var(--space-4) calc(var(--space-2) + var(--safe-bottom));
   border-top: 1px solid var(--ln);
 }
+/* The keyboard covers the home bar while a field in the editor has focus, so
+   the inset is not paid then. The editor is portaled to body, outside
+   .app-shell, so it keys on its own focus (2026-10-21, second review). */
+.ne-screen:focus-within .ne-tags { padding-bottom: var(--space-2); }
 .ne-tags-hash { color: var(--ac2); font-weight: 700; }
 .ne-tags input { flex: 1; min-width: 0; min-height: var(--touch-min); border: 0; background: transparent; outline: 0; }
 .ne-tags input::placeholder { color: var(--fnt); }

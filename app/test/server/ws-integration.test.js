@@ -186,3 +186,42 @@ test('an overflowing client is closed once and logged once, however much arrives
     `200 pushes past a full queue must log once, got ${overflow.length}: ${overflow.slice(0, 3).join(' | ')}`,
   );
 });
+
+// ONE BAD FRAME ENDS ONE CONNECTION, NOT THE SERVER (2026-10-21 audit). The ws
+// receiver emits 'error' for a protocol violation, and the accepted socket had
+// no listener, so a two-byte unmasked frame from any client killed node and
+// dropped every phone with it. Two-sided: the offender is closed and logged
+// once, and another client on the same server still gets its answer.
+test('a malformed frame closes only the client that sent it, logged once', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'harbor-server-bad-frame-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const warnings = [];
+  const logger = { info() {}, warn: (line) => warnings.push(String(line)), error() {} };
+  const composed = await composeServer({
+    userDataDir: dir,
+    env: { ...process.env, HARBOR_NO_DAEMON_START: '1', HARBOR_TAILNET_LOGINS: 'none', HARBOR_SESSIOND_DIR: path.join(dir, 'sessiond') },
+    sidebar: { emitter: new EventEmitter(), async start() {}, close() {}, getState: () => ({ model: { projects: [] } }) },
+    artifacts: { async list() { return { ok: true, artifacts: [] }; }, isServable() { return false; } },
+    icons: { async list() { return { dir, icons: {} }; }, watch() {}, async filePathFor() { return null; }, mimeFor() { return null; } },
+    tasks: { read: async () => ({}), mutate: async () => ({}), subscribe() {}, close() {} },
+    logger,
+  });
+  const address = await composed.listen({ host: '127.0.0.1', port: 0 });
+  t.after(() => composed.close());
+  const url = `ws://127.0.0.1:${address.port}/ws`;
+
+  const offender = new WebSocket(url);
+  offender.on('error', () => { /* the server ends this socket; that is the point */ });
+  await new Promise((resolve, reject) => { offender.once('open', resolve); offender.once('error', reject); });
+  const offenderClosed = new Promise((resolve) => offender.once('close', resolve));
+  // A text frame with no MASK bit: every client frame must be masked.
+  offender._socket.write(Buffer.from([0x81, 0x00]));
+  await offenderClosed;
+
+  const served = await call(url, 'sidebar:get-state');
+  assert.equal(served.error, undefined, 'the server must still answer a different client');
+  const socketErrors = warnings.filter((line) => /socket error, closing it/.test(line));
+  assert.equal(socketErrors.length, 1, `one line for one bad socket, got: ${socketErrors.join(' | ')}`);
+  assert.match(socketErrors[0], /MASK must be set/);
+  assert.ok(socketErrors[0].length < 300, 'the reason is bounded');
+});

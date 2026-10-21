@@ -67,7 +67,7 @@ async function main() {
     terminalBridge: { emitter: new EventEmitter(), start() {}, close() {} },
     sessionSend: { emitter: new EventEmitter(), getWorkMeter: async () => ({ verb: 'Testing', elapsed: '1m 35s', tokens: '↓ 3.1k', thinking: false }), getMenu: async () => null, getQueueState: () => ({ count: 0 }) },
     allowedTailnetLogins: [], selfOriginHosts: ['127.0.0.1'],
-    webDist: path.join(APP, 'dist-web'),
+    webDist: process.env.HARBOR_WEB_DIST || path.join(APP, 'dist-web'),
   });
   const address = await composed.listen({ host: '127.0.0.1', port: 0 });
   const base = `http://127.0.0.1:${address.port}`;
@@ -112,7 +112,7 @@ async function main() {
     await cold.screenshot({ path: path.join(OUT, '3-cold-boot-from-cache.png') });
     results.coldBootHasSession = Boolean(await cold.$('.hdr-title'));
     results.coldBootTitle = await cold.textContent('.hdr-title').catch(() => null);
-    const pill = await cold.$('.connection-banner.reconnecting');
+    const pill = await cold.$('.conn-pill.is-reconnecting');
     results.reconnectingPill = Boolean(pill);
     results.coldBootError = await cold.evaluate(() => /could not be displayed/i.test(document.body.innerText));
     results.coldBootStatus = await cold.textContent('.hdr-status').catch(() => null);

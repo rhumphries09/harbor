@@ -222,7 +222,7 @@ async function main() {
   await page.goto(`${baseUrl}/`);
   await page.waitForSelector('.app-shell', { timeout: 15000 });
   await page.waitForFunction(() => (
-    document.querySelector('.connection-banner')?.classList.contains('online')
+    document.querySelector('.app-shell')?.dataset.connection === 'online'
   ), null, { timeout: 20000 });
   await page.waitForSelector('.conv-header-btn', { timeout: 15000 });
   await page.waitForSelector('.conv-assistant', { timeout: 15000 });

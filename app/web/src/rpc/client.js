@@ -19,7 +19,9 @@ const STORAGE_TOKEN = 'harbor-web-token';
 const CLOSE_CODE_HINTS = {
   1000: 'closed normally',
   1001: 'server going away',
-  1006: 'connection dropped without a clean close (network or TLS failure before the handshake completed)',
+  // 1006 only says the close had no reason: the network, the tunnel or the
+  // server went away. It cannot tell which, so it does not guess.
+  1006: 'the connection closed without a reason (the network, Tailscale or the server went away)',
   1011: 'server hit an internal error',
   1013: 'server closed it: client too slow to drain pushes',
   1015: 'TLS handshake failed',
@@ -83,14 +85,26 @@ export function defaultServerUrl() {
 // installed app its OWN storage container, so it starts with no token no matter
 // what was pasted into Safari, and the old gate had no way to tell that state
 // apart from "not set up yet".
-export async function probeAuth(serverUrl) {
+//
+// BOUNDED, AND "COULD NOT ASK" IS NOT "NO" (2026-10-21 review, finding 3). The
+// fetch had no deadline, so a launch during a dead tunnel sat on the splash for
+// as long as the OS let it, and a network failure was reported as "a token is
+// required", which sent a phone with a passing outage to the setup form.
+const PROBE_TIMEOUT_MS = 4000;
+export async function probeAuth(serverUrl, { timeoutMs = PROBE_TIMEOUT_MS } = {}) {
   const base = serverUrl || defaultServerUrl();
   if (!base) return { authenticated: false, tokenRequired: true, login: null };
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
     const response = await fetch(new URL('/whoami', base).toString(), {
       cache: 'no-store',
       credentials: 'omit',
+      ...(controller ? { signal: controller.signal } : {}),
     });
+    // A proxy in front of a restarting server answers 502/503: unavailable.
+    if (response.status >= 500) return { authenticated: false, tokenRequired: true, login: null, unavailable: true };
+    // A server older than /whoami answers 404: the old behaviour, ask for a token.
     if (!response.ok) return { authenticated: false, tokenRequired: true, login: null };
     const body = await response.json();
     return {
@@ -99,9 +113,9 @@ export async function probeAuth(serverUrl) {
       login: body?.login || null,
     };
   } catch {
-    // Offline, or a server older than /whoami. Fall back to requiring a token,
-    // which is the behaviour that was already there.
-    return { authenticated: false, tokenRequired: true, login: null };
+    return { authenticated: false, tokenRequired: true, login: null, unavailable: true };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -127,11 +141,53 @@ function wsUrlFromHttp(serverUrl, token) {
 const RECONNECT_STEPS_MS = [250, 1000, 2000, 4000];
 const PROBE_MS = 2500;
 const WAKE_DEBOUNCE_MS = 400;
+// A HANDSHAKE THAT NEVER FINISHES IS A FAILURE TOO (2026-10-21, Pat's phone sat
+// on "Connecting…" and "Cannot reach harbor-server" at 08:14 while the server
+// answered loopback in milliseconds). A socket opened while iOS was still
+// bringing the Tailscale tunnel back can sit in CONNECTING until the OS gives up
+// on the TCP connect, tens of seconds later, and nothing here retried, because
+// the backoff only runs on a close and wake() ignored a CONNECTING socket. A
+// healthy handshake over the tailnet takes well under two seconds.
+const CONNECT_TIMEOUT_MS = 6000;
+// On wake, a handshake older than this was started before the app was
+// suspended (or in the dead tunnel just after) and is replaced at once.
+const WAKE_STALE_CONNECT_MS = 1500;
+// AN OPEN SOCKET IS PROVEN WHILE THE APP IS ON SCREEN (2026-10-21 review,
+// finding 4). A network handoff (Wi-Fi to cellular, a tunnel re-key) can
+// swallow a connection without a close ever reaching the phone, so the socket
+// keeps saying OPEN, every call waits forever and a send spins until something
+// else wakes the page. One small round trip every HEARTBEAT_MS while visible,
+// and no answer within HEARTBEAT_ANSWER_MS replaces the socket and fails what
+// was waiting on it (the composer keeps its text and says so).
+// EVERY REQUEST ENDS (2026-10-21, second Sol review). The heartbeat proves the
+// socket, not each operation: a server that kept answering heartbeats while one
+// call never came back left Send spinning forever. Each call now has a
+// deadline sized to its work; a send or an answer may wait on a starting
+// session for minutes, a read never should. A timed-out action may still have
+// happened, so the error says to check before repeating it, and nothing is
+// ever resent automatically.
+const CALL_TIMEOUT_MS = 45_000;
+const ACTION_TIMEOUT_MS = 240_000;
+const ACTION_METHODS = new Set([
+  'session:send', 'resume-session', 'new-session', 'session:takeover', 'session:menu-answer',
+  'ask:answer', 'ask:decline', 'upload:image', 'whisper:transcribe', 'voice:token',
+  'capabilities:cycle-permission-mode', 'session:interrupt',
+]);
+const HEARTBEAT_MS = 20000;
+const HEARTBEAT_ANSWER_MS = 5000;
 
-export function createRpcClient({ serverUrl, token, onPush, onConnectionChange, lifecycle = null }) {
+export function createRpcClient({
+  serverUrl, token, onPush, onConnectionChange, lifecycle = null,
+  connectTimeoutMs = CONNECT_TIMEOUT_MS, wakeStaleConnectMs = WAKE_STALE_CONNECT_MS,
+  heartbeatMs = HEARTBEAT_MS, heartbeatAnswerMs = HEARTBEAT_ANSWER_MS,
+  callTimeoutMs = CALL_TIMEOUT_MS, actionTimeoutMs = ACTION_TIMEOUT_MS,
+}) {
   let ws = null;
   let failedAttempts = 0;
   let lastWakeAt = 0;
+  let connectStartedAt = 0;
+  let connectTimer = null;
+  let heartbeatTimer = null;
   let detachLifecycle = null;
   let nextId = 1;
   const pending = new Map();
@@ -177,7 +233,7 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange, 
     const error = new Error(reason);
     const entries = [...pending.values()];
     pending.clear();
-    for (const handler of entries) handler.reject(error);
+    for (const handler of entries) { clearTimeout(handler.timer); handler.reject(error); }
   }
 
   function connect() {
@@ -199,10 +255,23 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange, 
       return;
     }
     const current = () => ws === socket;
+    connectStartedAt = Date.now();
+    clearTimeout(connectTimer);
+    connectTimer = setTimeout(() => {
+      connectTimer = null;
+      const CONNECTING = globalThis.WebSocket?.CONNECTING ?? 0;
+      if (current() && socket.readyState === CONNECTING) {
+        failedAttempts += 1;
+        replaceSocket('the server did not answer the handshake', { countFailure: true });
+      }
+    }, connectTimeoutMs);
     socket.onopen = () => {
       if (!current()) return;
+      clearTimeout(connectTimer);
+      connectTimer = null;
       failedAttempts = 0;
       setState(CONNECTION.connected);
+      startHeartbeat(socket);
     };
     // onerror never carries a real reason (the WebSocket spec deliberately
     // hides it from the error event for security), and onclose fires right
@@ -215,6 +284,8 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange, 
       // A socket this client already replaced (a failed wake probe) closes
       // late; it must not tear down its successor.
       if (!current()) return;
+      clearTimeout(connectTimer);
+      connectTimer = null;
       ws = null;
       const code = event?.code;
       const reason = event?.reason || CLOSE_CODE_HINTS[code] || `code ${code ?? 'unknown'}`;
@@ -243,16 +314,49 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange, 
         const handler = pending.get(message.id);
         if (!handler) return;
         pending.delete(message.id);
+        clearTimeout(handler.timer);
         if (message.error) handler.reject(new Error(message.error));
         else handler.resolve(message.result);
       }
     };
   }
 
+  function startHeartbeat(socket) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(() => {
+      const doc = lifecycle?.document ?? (typeof document !== 'undefined' ? document : null);
+      if (ws !== socket) { clearInterval(heartbeatTimer); heartbeatTimer = null; return; }
+      if (doc && doc.visibilityState === 'hidden') return;
+      probe(socket, heartbeatAnswerMs, 'no answer from the server');
+    }, heartbeatMs);
+  }
+
+  // One round trip on `socket`; silence past `answerMs` replaces it. Any reply
+  // proves the transport, an error reply included.
+  let probing = null;
+  function probe(socket, answerMs, reason) {
+    if (probing === socket) return;
+    probing = socket;
+    let answered = false;
+    const timer = setTimeout(() => {
+      if (probing === socket) probing = null;
+      if (!answered && ws === socket) replaceSocket(reason);
+    }, answerMs);
+    const settle = () => { answered = true; clearTimeout(timer); if (probing === socket) probing = null; };
+    call('daemon:get-banner').then(settle, (error) => {
+      if (/not connected|connection dropped/.test(String(error?.message))) return;
+      settle();
+    });
+  }
+
   function disconnect() {
     manualClose = true;
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+    clearTimeout(connectTimer);
+    connectTimer = null;
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
     detachLifecycle?.();
     detachLifecycle = null;
     failPending('disconnected');
@@ -274,9 +378,11 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange, 
   // Abandon a socket that cannot be trusted (no answer to the wake probe) and
   // start a fresh one now, without waiting for its close event, which on a
   // dead link can take a TCP timeout to arrive.
-  function replaceSocket(reason) {
+  function replaceSocket(reason, { countFailure = false } = {}) {
     const stale = ws;
     ws = null;
+    clearTimeout(connectTimer);
+    connectTimer = null;
     if (stale) {
       stale.onopen = stale.onmessage = stale.onerror = stale.onclose = null;
       try { stale.close(4000, reason); } catch { /* already gone */ }
@@ -285,8 +391,19 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange, 
     setState(CONNECTION.disconnected, reason);
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
-    failedAttempts = 0;
+    // A timed-out handshake keeps its count so the shell can tell a long outage
+    // from a blip; a wake or a manual retry starts the ladder over.
+    if (!countFailure) failedAttempts = 0;
     connect();
+  }
+
+  // The person asked for a retry (the connection pill). A socket that is open
+  // is proven the same way a wake proves it; anything else is replaced now.
+  function reconnectNow() {
+    if (manualClose) return;
+    const OPEN = globalThis.WebSocket?.OPEN ?? 1;
+    if (ws && ws.readyState === OPEN) { lastWakeAt = 0; wake(); return; }
+    replaceSocket('retrying now');
   }
 
   // The page came back (or the network did). Reconnect now instead of waiting
@@ -306,18 +423,13 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange, 
       connect();
       return;
     }
-    if (ws.readyState !== OPEN) return;
-    const probed = ws;
-    let answered = false;
-    const timer = setTimeout(() => {
-      if (!answered && ws === probed) replaceSocket('no answer after the app came back');
-    }, PROBE_MS);
-    // Any reply proves the round trip, an error reply included.
-    const settle = () => { answered = true; clearTimeout(timer); };
-    call('daemon:get-banner').then(settle, (error) => {
-      if (/not connected|connection dropped/.test(String(error?.message))) return;
-      settle();
-    });
+    if (ws.readyState === CONNECTING) {
+      // A fresh handshake is left to finish; one that was already running
+      // when the app went away is the dead-tunnel case and is replaced.
+      if (at - connectStartedAt >= wakeStaleConnectMs) replaceSocket('a connection attempt from before the app was suspended');
+      return;
+    }
+    probe(ws, PROBE_MS, 'no answer after the app came back');
   }
 
   function attachLifecycle() {
@@ -338,14 +450,24 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange, 
     };
   }
 
-  function call(method, payload) {
+  function call(method, payload, { timeoutMs } = {}) {
     return new Promise((resolve, reject) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         reject(new Error('not connected'));
         return;
       }
       const id = nextId++;
-      pending.set(id, { resolve, reject });
+      const limit = timeoutMs ?? (ACTION_METHODS.has(method) ? actionTimeoutMs : callTimeoutMs);
+      const timer = setTimeout(() => {
+        if (!pending.delete(id)) return;
+        const seconds = Math.round(limit / 1000);
+        const error = new Error(ACTION_METHODS.has(method)
+          ? `Harbor did not answer within ${seconds} s. It may still have happened: check the conversation before trying again`
+          : `Harbor did not answer within ${seconds} s`);
+        error.code = 'TIMEOUT';
+        reject(error);
+      }, limit);
+      pending.set(id, { resolve, reject, timer });
       ws.send(JSON.stringify({ id, method, payload }));
     });
   }
@@ -385,6 +507,8 @@ export function createRpcClient({ serverUrl, token, onPush, onConnectionChange, 
     getState: () => state,
     getLastError: () => lastError,
     getConnectCount: () => connectCount,
+    getFailedAttempts: () => failedAttempts,
     wake,
+    reconnectNow,
   };
 }

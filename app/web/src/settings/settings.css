@@ -1,6 +1,11 @@
 .settings-sheet {
+  /* The VISIBLE rectangle, like every sheet (use-visual-viewport.js): inset:0
+     is the layout viewport, which runs under the keyboard (2026-10-21). */
   position: fixed;
-  inset: 0;
+  top: var(--app-offset-top, 0px);
+  left: var(--app-offset-left, 0px);
+  width: var(--app-w, 100%);
+  height: var(--app-h, 100%);
   z-index: 80;
   display: flex;
   align-items: flex-end;
@@ -17,7 +22,7 @@
   flex: 0 1 auto;
   width: 100%;
   max-width: 430px;
-  max-height: min(88vh, 720px);
+  max-height: min(calc(var(--app-h, 100dvh) * 0.88), 720px);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -81,7 +86,7 @@
 .settings-value {
   font-size: 15px;
   line-height: 1.4;
-  color: var(--text);
+  color: var(--tx);
   word-break: break-all;
 }
 
@@ -105,7 +110,7 @@
   border-radius: 12px;
   border: 1px solid var(--ln);
   background: rgba(255, 255, 255, 0.04);
-  color: var(--text);
+  color: var(--tx);
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
@@ -116,6 +121,35 @@
   color: var(--err);
   background: rgba(217, 138, 138, 0.08);
 }
+
+.settings-btn-primary {
+  border-color: transparent;
+  background: var(--ac);
+  color: #fff;
+}
+
+.settings-btn-quiet {
+  color: var(--sub);
+}
+
+.settings-secondary {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-conn::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: 50%;
+  vertical-align: 1px;
+  background: var(--live);
+}
+
+.settings-conn.is-offline { color: var(--err); }
+.settings-conn.is-offline::before { background: var(--err); }
 
 .settings-confirm {
   margin: 0 0 12px;

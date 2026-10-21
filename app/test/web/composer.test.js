@@ -71,7 +71,9 @@ test('MOBILE-OVERHAUL-4: refusal reasons are rendered verbatim while allowed sen
   assert.match(sendHook, /result\?\.ok === false/);
   assert.match(sendHook, /String\(result\.reason\)/);
   assert.match(composer, /role=\{status\.phase === 'error' \? 'alert'/);
-  assert.match(composer, /if \(result\.ok\) \{\s*setText\(''\)/);
+  // An allowed send clears the draft it SENT, never text typed while it was in
+  // flight (2026-10-21, second review: a late acknowledgment wiped it).
+  assert.match(composer, /if \(result\.ok\) \{[\s\S]{0,400}?setText\(\(current\) => \(current === sentText \? '' : current\)\)/);
 });
 
 test('MOBILE-PARITY-7: composer ships voice-to-draft, slash palette, formatting toolbar, and live voice controls', () => {

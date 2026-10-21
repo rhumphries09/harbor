@@ -30,8 +30,56 @@
 // load that fed the next stall. A real stale link fails on EVERY poll, so it
 // still shows a new burst every ~10 s and trips in well under a minute; a
 // single stall is one burst and never does.
+//
+// OUR OWN STALL IS NOT A BAD LINK (2026-10-21 audit). When this process's event
+// loop blocks (an 18.5 s regex over a pasted image was measured), every daemon
+// request's 10 s deadline expires inside the stall and fires the moment the
+// loop resumes, before the poll phase can read the answer that is already
+// waiting: a perfectly healthy daemon "times out" from here. Errors that land
+// while, or within a few seconds after, the loop lagged past the request
+// timeout are therefore not evidence and never count; a real stale link keeps
+// failing between stalls and still trips.
 
 const LINK_ERROR = /timed out|connection closed|ECONNRESET|EPIPE|not connected|socket/i;
+
+// Measures this process's own event-loop lag: a 1 s interval that should fire
+// every second, and whatever it fires late by is time the loop spent blocked.
+// unref'd, so it never holds the process open. `worstSince` also counts a
+// stall still being caught up on (no tick since it ended), because the
+// deadline timers it expired run in the same timers phase, maybe ahead of this.
+function createLoopLagMonitor({
+  intervalMs = 1000,
+  reportMs = 1000,
+  log = () => {},
+  now = () => Date.now(),
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+} = {}) {
+  let lastTick = now();
+  let recent = []; // { at, ms } of the last few lags over reportMs, stamped when observed
+  const tick = () => {
+    const at = now();
+    const drift = at - lastTick - intervalMs;
+    lastTick = at;
+    if (drift > reportMs) {
+      recent = [...recent.slice(-7), { at, ms: drift }];
+      log(`event loop lag observed: ${Math.round(drift)}ms`);
+    }
+  };
+  const timer = setIntervalFn(tick, intervalMs);
+  timer?.unref?.();
+  return {
+    tick,
+    // The longest stall observed at or after `sinceMs`, or still in progress.
+    worstSince(sinceMs) {
+      const pending = now() - lastTick - intervalMs;
+      let worst = pending > reportMs ? pending : 0;
+      for (const lag of recent) if (lag.at >= sinceMs && lag.ms > worst) worst = lag.ms;
+      return worst;
+    },
+    close() { clearIntervalFn(timer); },
+  };
+}
 
 function createLinkWatchdog({
   ping, // () => Promise, a FRESH control client's ping; rejects when the daemon is unreachable
@@ -42,12 +90,39 @@ function createLinkWatchdog({
   // A link error more than this long after the previous one starts a new burst.
   burstGapMs = 5_000,
   now = () => Date.now(),
+  // { worstSince(ms) => lagMs }, normally createLoopLagMonitor. Absent means
+  // the rule above is off and every link error counts, as before.
+  loopLag = null,
+  // A request does not need a stall as long as its whole timeout to miss it: one
+  // already 8 s into its 10 s budget misses on a 2 s stall (second Sol review,
+  // which tripped the first rule with four 8 s stalls). So any stall of at
+  // least lagExcludeMs inside a request's lifetime (the sessiond client's 10 s
+  // timeout plus a grace for the expired timers to fire, lagGraceMs) excuses
+  // the error. A link that is really broken also fails between stalls, and
+  // those failures still count.
+  lagExcludeMs = 2_000,
+  lagGraceMs = 15_000,
 } = {}) {
   if (typeof ping !== 'function' || typeof exit !== 'function') throw new TypeError('createLinkWatchdog requires ping and exit');
   let bursts = []; // start time of each burst
   let lastErrorAt = null;
   let checking = false;
   let tripped = false;
+  let excused = 0;
+  let lastExcusedAt = null;
+
+  // True when this error is our own stall's echo, not the link's fault. Said
+  // once per stall, so a stall that fails ten requests is one line.
+  function causedByOwnLag(at, source) {
+    const lagMs = loopLag?.worstSince?.(at - lagGraceMs) || 0;
+    if (lagMs < lagExcludeMs) return false;
+    excused += 1;
+    if (lastExcusedAt === null || at - lastExcusedAt > lagGraceMs) {
+      log(`link watchdog: ${source} link error landed right after this server's own ${Math.round(lagMs)}ms event-loop stall; not counted against the link`);
+    }
+    lastExcusedAt = at;
+    return true;
+  }
 
   async function check() {
     if (checking || tripped) return;
@@ -75,13 +150,15 @@ function createLinkWatchdog({
       const message = String(error?.message || error || '');
       if (!LINK_ERROR.test(message)) return;
       const at = now();
+      if (causedByOwnLag(at, source)) return;
       if (lastErrorAt === null || at - lastErrorAt > burstGapMs) bursts.push(at);
       lastErrorAt = at;
       check().catch(() => {});
     },
     check,
     get pending() { return bursts.length; },
+    get excused() { return excused; },
   };
 }
 
-module.exports = { createLinkWatchdog };
+module.exports = { createLinkWatchdog, createLoopLagMonitor };

@@ -58,8 +58,11 @@ function createHistoryProvider(options = {}) {
   const execute = options.runIndexer || ((args) => historyIndex.run(args));
   const watchFactory = options.watchFactory || ((target, cb) => watchPath(target, { recursive: true }, cb));
   const debounceMs = options.debounceMs ?? 5000;
+  const maxWaitMs = options.maxWaitMs ?? 30_000;
+  const now = options.now || Date.now;
   const projectsPath = options.projectsPath || defaults.paths.projectsDir;
   let timer = null;
+  let firstChangeAt = null;
   let watcher = null;
   let migrationTimer = null; let migrationClosed = false;
   provider.startBackgroundMigration = () => {
@@ -77,9 +80,23 @@ function createHistoryProvider(options = {}) {
     migrationTimer = setTimeout(step, 0);
   };
 
+  // A TRAILING DEBOUNCE WITH A CEILING (2026-10-21 audit). Every write under
+  // ~/.claude/projects reset a 5 s timer, and a busy session writes every
+  // second or so, so on a Claude-only busy stream the refresh never fired:
+  // titles, membership and recency froze for as long as the work went on (60 s
+  // of one-second writes produced zero events). Quiet still settles after
+  // debounceMs; a stream that never pauses refreshes at least every maxWaitMs.
+  // The consumer's refresh stays single-flight (sidebar-bridge.js), so this
+  // can never start overlapping scans.
   const changed = () => {
+    const at = now();
+    if (firstChangeAt === null) firstChangeAt = at;
     clearTimeout(timer);
-    timer = setTimeout(() => provider.emit('history-changed'), debounceMs);
+    timer = setTimeout(() => {
+      timer = null;
+      firstChangeAt = null;
+      provider.emit('history-changed');
+    }, Math.max(0, Math.min(debounceMs, firstChangeAt + maxWaitMs - at)));
   };
   // HB-001, the launch blocker. fs.watch throws ENOENT SYNCHRONOUSLY when the
   // directory does not exist, and this constructor runs inside the
@@ -125,6 +142,7 @@ function createHistoryProvider(options = {}) {
     migrationClosed = true; clearTimeout(migrationTimer);
     clearTimeout(timer);
     timer = null;
+    firstChangeAt = null;
     if (watcher) watcher.close();
     watcher = null;
     historyIndex.close?.();

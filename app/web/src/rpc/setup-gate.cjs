@@ -18,13 +18,25 @@
 //                   unauthenticated.
 //   {authenticated} whether this caller is already authenticated by the tailnet,
 //                   in which case no token exists to be asked for.
-function setupGate({ settings = {}, auth = null } = {}) {
-  if (auth === null || auth === undefined) return 'pending';
+//   {unavailable}   the server could not be asked (offline, restarting, or no
+//                   answer within the probe's deadline). That is not "a token
+//                   is required", so it HOLDS and the probe is retried; reading
+//                   it as required stranded a phone on the paste-a-token screen
+//                   after a passing outage (2026-10-21 review, finding 3).
+//   rememberedAuth  this phone was authenticated by the tailnet at this server
+//                   before, so while the server cannot be asked it opens its
+//                   saved list and conversations instead of a splash; the
+//                   socket still has to authenticate to do anything.
+function setupGate({ settings = {}, auth = null, rememberedAuth = false } = {}) {
+  // A stored token needs nothing from the server to try its own connection, so
+  // it never waits on /whoami (2026-10-21): the shell, its cached list and its
+  // cached conversation paint at once and connect when they can.
+  if (settings.serverUrl && settings.token) return 'ready';
+  if (auth === null || auth === undefined) return settings.serverUrl && rememberedAuth ? 'ready' : 'pending';
   // No server URL means nothing to ask, which is the genuine first-run case on a
   // client that was not served BY the server it talks to.
   if (!settings.serverUrl) return 'setup';
-  // A stored token still works, so a non-tailnet client is unaffected.
-  if (settings.token) return 'ready';
+  if (auth.unavailable) return rememberedAuth ? 'ready' : 'pending';
   return auth.authenticated ? 'ready' : 'setup';
 }
 

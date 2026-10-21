@@ -6,6 +6,8 @@ import './capability.css';
 import { providerPlans, planMoveReason } from '../../../src/shared/plan-options.cjs';
 import { PlanChoices } from './PlanChoices.jsx';
 
+const EFFORT_LABELS = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'X-high', max: 'Max' };
+
 export function CapabilitySheet({ open, onClose, client, session, header, onApplied }) {
   const { capabilities: caps, options, permissionMode, setPermissionMode, error } = useCapabilities(open ? client : null, session);
   const [applying, setApplying] = useState('');
@@ -125,7 +127,12 @@ export function CapabilitySheet({ open, onClose, client, session, header, onAppl
             </div>
           </section>
         ))}
-        <section><h3>Effort</h3><div className="cap-efforts">{efforts.filter((value) => value !== 'default').map((value) => <button type="button" key={value} onClick={() => sendSetting('effort', value)} disabled={Boolean(applying)}>{value}</button>)}</div>{caps?.effort?.note ? <p className="cap-note">{caps.effort.note}</p> : null}</section>
+        <section><h3>Effort</h3><div className="cap-efforts" role="radiogroup" aria-label="Effort">{efforts.filter((value) => value !== 'default').map((value) => {
+          // The session's current effort is marked, so a change is a choice
+          // between visible states rather than a guess (2026-10-21 review).
+          const on = value === (header?.effort || session?.effort);
+          return <button type="button" key={value} role="radio" aria-checked={on} className={on ? 'on' : undefined} onClick={() => sendSetting('effort', value)} disabled={Boolean(applying)}>{EFFORT_LABELS[value] || value}</button>;
+        })}</div>{caps?.effort?.note ? <p className="cap-note">{caps.effort.note}</p> : null}</section>
         <section><h3>Permission mode</h3><button type="button" className="cap-permission" onClick={cyclePermission} disabled={!session?.paneId || Boolean(applying)}><span>{permissionMode === undefined ? 'Reading…' : permissionMode === null ? (session?.paneId ? 'Unreadable' : 'Not controlled') : (MODE_LABEL[permissionMode] || permissionMode)}</span><small>Tap to cycle</small></button></section>
         <section><h3>Plugins</h3><div className="cap-plugin-list">{caps?.plugins?.length ? caps.plugins.map((plugin) => <div key={`${plugin.name}:${plugin.marketplace}`}><span>{plugin.name}</span><small>{plugin.enabled ? 'on' : 'off'}</small></div>) : <p className="cap-note">No plugins reported</p>}</div></section>
         <section><h3>Slash commands</h3><div className="cap-command-list">{(caps?.commands || []).map((command) => <div key={`${command.source}:${command.name}`}><code>{command.name}</code><small>{command.source}</small></div>)}</div></section>

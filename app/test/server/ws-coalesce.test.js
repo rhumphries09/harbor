@@ -252,3 +252,91 @@ test('an append queued AFTER the newest replace still arrives after it', () => {
   enqueue({ sessionId: 's1', append: [{ key: 'b1' }], changed: [] });
   assert.equal(queue.length, 2, 'a delta newer than every snapshot is never dropped');
 });
+
+// THE CAP HOLDS AFTER A MERGE, AND A MERGE KEEPS ONE COPY PER KEY (2026-10-21
+// audit). The merge path returned before any bound was checked, and it
+// concatenated `changed`, so a slow phone's one slot grew by a whole
+// image-bearing prompt per token tick: a queue capped at 1,024 bytes accepted
+// twenty merged deltas holding 18,536 bytes.
+test('a merged delta that outgrows the byte cap is refused, after frames are evicted first', () => {
+  const queue = new ClientQueue({ maxBytes: 1024, logger: { warn() {} } });
+  const results = [];
+  for (let i = 0; i < 20; i += 1) {
+    const payload = push('transcript:update', [{ sessionId: 's', append: [{ key: `b${i}`, text: 'x'.repeat(900) }] }]);
+    results.push(queue.enqueue('transcript:update', payload, coalesceKey('transcript:update', payload.args)));
+  }
+  assert.equal(results[0], true, 'the first push fits as before');
+  assert.equal(results[1], false, 'a merge that grows the slot past the cap is refused (the transport closes 1013)');
+  assert.ok(queue.bytes <= 1024, `retained ${queue.bytes} bytes against a 1024 byte cap`);
+
+  // Frames are the recoverable channel, so they go before a merge is refused.
+  const framed = new ClientQueue({ maxBytes: 1024, logger: { warn() {} } });
+  framed.enqueue('terminal:frame', push('terminal:frame', [{ data: 'f'.repeat(500) }]));
+  const first = push('transcript:update', [{ sessionId: 's', append: [{ key: 'b0', text: 'x'.repeat(300) }] }]);
+  const second = push('transcript:update', [{ sessionId: 's', append: [{ key: 'b1', text: 'x'.repeat(300) }] }]);
+  assert.equal(framed.enqueue('transcript:update', first, coalesceKey('transcript:update', first.args)), true);
+  assert.equal(framed.enqueue('transcript:update', second, coalesceKey('transcript:update', second.args)), true);
+  assert.equal(framed.droppedFrames, 1);
+  assert.deepEqual(framed.items.map((item) => item.channel), ['transcript:update']);
+  assert.equal(framed.bytes, Buffer.byteLength(framed.items[0].text));
+});
+
+test('a superseding snapshot alone in the queue is still admitted however large', () => {
+  const queue = new ClientQueue({ maxBytes: 1024, logger: { warn() {} } });
+  const big = (n) => push('transcript:update', [{ sessionId: 's', replace: [{ key: 'b0', text: 'x'.repeat(4096), n }] }]);
+  assert.equal(queue.enqueue('transcript:update', big(1), coalesceKey('transcript:update', big(1).args)), true);
+  assert.equal(queue.enqueue('transcript:update', big(2), coalesceKey('transcript:update', big(2).args)), true,
+    'a newer snapshot replaces its slot; it is one payload, not a backlog');
+  assert.equal(queue.length, 1);
+});
+
+test('repeated versions of one image prompt keep ONE copy in the slot, latest wins', () => {
+  const { applyTranscriptUpdate } = require('../../src/shared/transcript-blocks.cjs');
+  const image = `data:image/png;base64,${'I'.repeat(4000)}`;
+  const prompt = (n) => ({ key: 'p', kind: 'user', text: 'look', images: [{ dataUri: image }], turnMeta: { outputTokens: n } });
+  const initial = [prompt(0)];
+  const deltas = [];
+  for (let i = 1; i <= 12; i += 1) {
+    // The pre-patch provider shape: the whole prompt rode in `changed` each time.
+    deltas.push({ sessionId: 's', append: [{ key: `r${i}`, text: `reply ${i}` }], changed: [prompt(i)] });
+  }
+  deltas.push({ sessionId: 's', append: [], changed: [], patched: [{ key: 'p', turnMeta: { outputTokens: 99 } }] });
+  const queue = new ClientQueue();
+  for (const delta of deltas) {
+    const payload = push('transcript:update', [delta]);
+    queue.enqueue('transcript:update', payload, coalesceKey('transcript:update', payload.args));
+  }
+  assert.equal(queue.length, 1);
+  assert.equal(queue.items[0].text.split(image).length - 1, 1, 'one copy of the image, not twelve');
+  const combined = JSON.parse(queue.items[0].text).args[0];
+  assert.deepEqual(applyTranscriptUpdate(initial, combined), deltas.reduce(applyTranscriptUpdate, initial));
+  assert.equal(applyTranscriptUpdate(initial, combined)[0].turnMeta.outputTokens, 99);
+});
+
+test('any sequence of deltas merges into one that applies exactly like the sequence', () => {
+  const { applyTranscriptUpdate } = require('../../src/shared/transcript-blocks.cjs');
+  let seed = 7;
+  const rand = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+  const keys = ['k0', 'k1', 'k2', 'k3', 'k4', 'k5'];
+  const pick = () => keys[rand(keys.length)];
+  const some = (make) => Array.from({ length: rand(3) }, make);
+  for (let trial = 0; trial < 400; trial += 1) {
+    const initial = keys.slice(0, rand(4)).map((key) => ({ key, v: 'held', img: 'kept' }));
+    const deltas = Array.from({ length: 2 + rand(5) }, (_, d) => ({
+      sessionId: 's',
+      ...(rand(3) === 0 ? { removed: some(pick) } : {}),
+      changed: some(() => ({ key: pick(), v: `c${trial}.${d}` })),
+      ...(rand(2) ? { patched: some(() => ({ key: pick(), [`p${rand(2)}`]: `${trial}.${d}` })) } : {}),
+      append: some(() => ({ key: pick(), v: `a${trial}.${d}` })),
+    }));
+    const queue = new ClientQueue();
+    for (const delta of deltas) {
+      const payload = push('transcript:update', [delta]);
+      queue.enqueue('transcript:update', payload, coalesceKey('transcript:update', payload.args));
+    }
+    assert.equal(queue.length, 1);
+    const combined = JSON.parse(queue.items[0].text).args[0];
+    assert.deepEqual(applyTranscriptUpdate(initial, combined), deltas.reduce(applyTranscriptUpdate, initial),
+      `trial ${trial}: ${JSON.stringify(deltas)}`);
+  }
+});

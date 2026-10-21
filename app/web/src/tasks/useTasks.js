@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import tasksModel from '../../../src/shared/tasks-model.cjs';
 import { CONNECTION } from '../rpc/client.js';
+import { readCachedDoc, writeCachedDoc } from '../rpc/local-cache.js';
 
 const { dayKey, msUntilDayRoll } = tasksModel;
 
@@ -32,7 +33,12 @@ export function useToday() {
 }
 
 export function useTasks(client) {
-  const [doc, setDoc] = useState(null);
+  // The last task list the phone read paints at once, offline included (local-cache.js).
+  const [doc, setDocState] = useState(() => readCachedDoc('tasks'));
+  const setDoc = useCallback((next) => {
+    setDocState(next);
+    if (next) writeCachedDoc('tasks', next);
+  }, []);
   const [recovery, setRecovery] = useState(null);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);

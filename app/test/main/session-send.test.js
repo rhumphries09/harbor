@@ -1961,6 +1961,27 @@ test('Claude /effort handles the same post-send full-history confirmation', asyn
   assert.deepEqual(h.sent.map(({ text }) => text), ['/effort ', 'low', '\r', '1', '\r']);
 });
 
+// The real 2.1.303 dialog wraps its explanation at the pane edge, at a
+// different word per capture; the one-line match missed both (Pat, 2026-10-21).
+for (const [fixtureName, level] of [['claude-2.1.303-effort-xhigh-120.txt', 'xhigh'], ['claude-2.1.303-effort-high-120.txt', 'high']]) {
+  test(`Claude /effort confirms the real wrapped cache warning (${fixtureName})`, async () => {
+    const dialog = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch', fixtureName), 'utf8');
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    const panes = ['conversation\n❯', dialog, 'conversation\n❯'];
+    h.deps.readPane = async () => panes.shift() ?? 'conversation\n❯';
+    const send = createSessionSend(h.deps);
+
+    await send.send({
+      sessionId: `s-effort-wrapped-${level}`,
+      text: `/effort ${level}`,
+      provider: 'claude',
+      pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
+    });
+
+    assert.deepEqual(h.sent.map(({ text }) => text), ['/effort ', level, '\r', '1', '\r']);
+  });
+}
+
 test('Claude /model leaves input untouched when no post-send confirmation appears', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   h.deps.readPane = async () => 'conversation\n❯';

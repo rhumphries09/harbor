@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useState } from 'react';
 import notesModel from '../../../src/shared/notes-model.cjs';
 import { CONNECTION } from '../rpc/client.js';
+import { readCachedDoc, writeCachedDoc } from '../rpc/local-cache.js';
 
 const { normalizeDoc } = notesModel;
 
 export function useNotes(client) {
-  const [doc, setDoc] = useState(null);
+  // The last notes the phone read paint at once, offline included (local-cache.js).
+  const [doc, setDocState] = useState(() => {
+    const cached = readCachedDoc('notes');
+    return cached ? normalizeDoc(cached) : null;
+  });
+  const setDoc = useCallback((next) => {
+    setDocState(next);
+    if (next) writeCachedDoc('notes', next);
+  }, []);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
 
@@ -23,7 +32,7 @@ export function useNotes(client) {
     } catch (e) {
       setError(String(e?.message || e));
     }
-  }, [client]);
+  }, [client, setDoc]);
 
   useEffect(() => {
     refresh();
@@ -44,7 +53,7 @@ export function useNotes(client) {
       unsubscribeChanged();
       unsubscribeConnection();
     };
-  }, [client, refresh]);
+  }, [client, refresh, setDoc]);
 
   const mutate = useCallback(async (op) => {
     if (!client) {
@@ -57,7 +66,7 @@ export function useNotes(client) {
     if (result?.ok && result.doc) setDoc(normalizeDoc(result.doc));
     setNotice(result?.ok ? null : (result?.reason || 'that change did not save'));
     return result || { ok: false };
-  }, [client]);
+  }, [client, setDoc]);
 
   return {
     doc,

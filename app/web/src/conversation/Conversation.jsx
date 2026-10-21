@@ -13,6 +13,9 @@ import './conversation.css';
 // of a resizable grid tile.
 
 const STICK_THRESHOLD_PX = 56;
+// How far above the tail before the "Latest" pill appears: about a screenful
+// of reading, so it never flickers in for a small nudge.
+const JUMP_SHOW_PX = 480;
 
 // A TAP ANYWHERE CLOSES IT, and there is a real close button (2026-10-06, Pat
 // had to force-quit the app to get out). Closing used to take a tap on the
@@ -294,12 +297,29 @@ export const Conversation = memo(function Conversation({
     });
   }, []);
 
+  // A WAY BACK TO THE LATEST (2026-10-21 review). A reader scrolled up is left
+  // in place, which is right, but nothing offered the way back down through a
+  // long coding run. Well above the tail, a "Latest" pill appears with how many
+  // blocks arrived since, and one tap returns to the bottom and resumes following.
+  const [away, setAway] = useState(false);
+  const awayBaseRef = useRef(0);
   const onScroll = () => {
     if (programmaticScrollRef.current) return;
     const node = scrollRef.current;
     if (!node) return;
     stickRef.current = distFromBottom(node) < STICK_THRESHOLD_PX;
+    const nextAway = distFromBottom(node) > JUMP_SHOW_PX;
+    if (nextAway !== away) {
+      if (nextAway) awayBaseRef.current = blocks.length;
+      setAway(nextAway);
+    }
   };
+  const jumpToLatest = useCallback(() => {
+    stickRef.current = true;
+    setAway(false);
+    scrollToTail();
+  }, [scrollToTail]);
+  const unseen = away ? Math.max(0, blocks.length - awayBaseRef.current) : 0;
 
   useLayoutEffect(() => {
     scrollToTail();
@@ -357,6 +377,14 @@ export const Conversation = memo(function Conversation({
           <div className="conv-working">
             <span className="conv-spinner" aria-hidden="true" />
             <span className="conv-working-text">{header.workingText || header.text || 'Working…'}</span>
+          </div>
+        ) : null}
+        {away ? (
+          <div className="conv-jump-dock">
+            <button type="button" className="conv-jump" onClick={jumpToLatest} aria-label={unseen ? `Jump to latest, ${unseen} new` : 'Jump to latest'}>
+              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3v9.5M3.5 8.5 8 13l4.5-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              {unseen ? `${unseen} new` : 'Latest'}
+            </button>
           </div>
         ) : null}
       </div>

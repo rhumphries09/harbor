@@ -16,6 +16,13 @@
 // rare. server/transport/ws.js now drops the redundant appends at the source;
 // this is the consumer-side half, so no ordering of pushes can ever draw one
 // block twice: an appended key that is already present updates in place.
+//
+// A PATCH KEEPS WHAT IT DOES NOT NAME (2026-10-21 audit). `changed` replaces a
+// held block whole, so a token tick on a screenshot prompt used to resend the
+// screenshot every time (1.57 MB for twelve short replies). `patched` carries
+// such a block WITHOUT its images and is merged over the held one, so the
+// images stay. A patch for a block not held is dropped, like a changed one;
+// order is removed, changed, patched, append.
 function applyTranscriptUpdate(blocks, update) {
   if (Array.isArray(update?.replace)) return update.replace;
   let next = Array.isArray(blocks) ? blocks : [];
@@ -26,6 +33,14 @@ function applyTranscriptUpdate(blocks, update) {
   if (update?.changed?.length) {
     const byKey = new Map(update.changed.map((block) => [block.key, block]));
     next = next.map((block) => byKey.get(block.key) || block);
+  }
+  if (update?.patched?.length) {
+    const byKey = new Map();
+    for (const patch of update.patched) byKey.set(patch.key, { ...byKey.get(patch.key), ...patch });
+    next = next.map((block) => {
+      const patch = byKey.get(block.key);
+      return patch ? { ...block, ...patch } : block;
+    });
   }
   if (update?.append?.length) {
     const at = new Map(next.map((block, index) => [block.key, index]));

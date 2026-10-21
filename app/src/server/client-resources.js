@@ -89,6 +89,12 @@ function createClientResources({ releasers = {}, logger = console } = {}) {
       return released;
     },
 
+    // Whether this client holds at least one of (kind, key). The transport asks
+    // this per push, so a transcript update reaches only its session's holders.
+    holds(clientId, kind, key) {
+      return (byClient.get(clientId)?.get(kind)?.get(key) || 0) > 0;
+    },
+
     // Test/diagnostic view: what this client currently holds.
     held(clientId) {
       const kinds = byClient.get(clientId);

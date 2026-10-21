@@ -248,8 +248,8 @@ async function drive() {
     const mobileUrl = log.match(/MOBILE_URL=(http:\/\/127\.0\.0\.1:\d+)/)[1];
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await cdp.send('Page.navigate', { url: mobileUrl });
-    await waitFor(cdp, 'Boolean(document.querySelector(".mobile-background-state"))');
-    assert.match(await cdp.eval('document.querySelector(".mobile-background-state").textContent'), /waiting on 2 agents/);
+    await waitFor(cdp, 'Boolean(document.querySelector(".hdr-status-background"))');
+    assert.match(await cdp.eval('document.querySelector(".hdr-status-background").textContent'), /waiting on 2 agents/);
     await cdp.shot('07-phone-background');
     await cdp.eval(`localStorage.setItem('harbor-web-active', ${JSON.stringify(CHILD)}); location.reload()`);
     await waitFor(cdp, 'Boolean(document.querySelector(".hdr-model-chip:disabled"))');

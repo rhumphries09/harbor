@@ -41,6 +41,33 @@ test('a stored token still works, so a non-tailnet client is unaffected', () => 
   assert.equal(gate, 'ready');
 });
 
+// 2026-10-21 review, finding 3: a stored token waited on an unbounded /whoami
+// before the shell (and its cached conversation) could paint.
+test('a stored token opens the app without waiting for the server to answer', () => {
+  assert.equal(setupGate({ settings: { serverUrl: TAILNET, token: 'a'.repeat(64) }, auth: null }), 'ready');
+});
+
+// Same review: a network failure used to read as "token required", which put a
+// phone that was merely offline on the paste-a-token screen.
+test('a server that could not be asked holds and retries, it never asks for a token', () => {
+  assert.equal(setupGate({
+    settings: { serverUrl: TAILNET, token: '' },
+    auth: { authenticated: false, tokenRequired: true, login: null, unavailable: true },
+  }), 'pending');
+});
+
+// Second Sol review: a phone the tailnet authenticated before (no token) sat on
+// the splash during an outage although its list and conversations were saved.
+test('a phone authenticated before opens its saved app while the server cannot be asked', () => {
+  const settings = { serverUrl: TAILNET, token: '' };
+  assert.equal(setupGate({ settings, auth: null, rememberedAuth: true }), 'ready');
+  assert.equal(setupGate({ settings, auth: { authenticated: false, tokenRequired: true, unavailable: true }, rememberedAuth: true }), 'ready');
+  // An explicit refusal still sends it to setup.
+  assert.equal(setupGate({ settings, auth: { authenticated: false, tokenRequired: true }, rememberedAuth: true }), 'setup');
+  // Never seen before: it holds.
+  assert.equal(setupGate({ settings, auth: { authenticated: false, tokenRequired: true, unavailable: true } }), 'pending');
+});
+
 test('no server URL is the genuine first run and still asks', () => {
   assert.equal(setupGate({ settings: { serverUrl: '', token: '' }, auth: { authenticated: true } }), 'setup');
   assert.equal(setupGate({ settings: {}, auth: { authenticated: true } }), 'setup');

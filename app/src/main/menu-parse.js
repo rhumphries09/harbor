@@ -49,7 +49,14 @@ const RESUME_SENTINEL_RE = /Resuming the full session will consume|Resume from s
 // nothing and the final step of every batch fell through to the raw-screen
 // fallback panel: answerable, but presented as a shape Harbor had never seen.
 const SUBMIT_SENTINEL_RE = /Ready to submit your answers\?/i;
-const FOOTERLESS_SENTINEL_RE = new RegExp(`${RESUME_SENTINEL_RE.source}|${SUBMIT_SENTINEL_RE.source}`, 'i');
+// The cache warning after /effort or /model in a cached conversation: "Change
+// effort level?" (or "Change model?") over "1. Yes, switch to <level>" and
+// "2. No, go back". It draws NO footer either (Claude Code 2.1.303, fixtures
+// test/fixtures/effort-switch/), so it fell to the raw-screen panel as an
+// "unrecognized prompt" (Pat, 2026-10-21). Matched as its own title line, which
+// prose never is.
+const SWITCH_SENTINEL_RE = /^\s*Change (?:effort level|model)\?\s*$/i;
+const FOOTERLESS_SENTINEL_RE = new RegExp(`${RESUME_SENTINEL_RE.source}|${SUBMIT_SENTINEL_RE.source}|${SWITCH_SENTINEL_RE.source}`, 'i');
 // An option row: optional indent, optional "❯" pointer (selected), then "N. label".
 const OPTION_RE = /^\s*(❯)?\s*(\d+)\.\s+(.+?)\s*$/;
 // A free-text option ("Type something…") opens an inline text field; a plain
@@ -436,9 +443,14 @@ function parseMenuScreen(screen) {
   // (live-caught 2026-07-26). Hook confirmations have no frame, so their scan
   // still starts at the top and keeps the reason lines that make the choice
   // decidable. An empty question is honest, a wrong one is not.
+  // Claude Code 2.1.303 draws the effort/model cache warning's top edge as a run
+  // of "▔" (upper eighth blocks), which the shared divider rule does not cover;
+  // without this the question read the status line above and the whole edge.
+  // Kept local to this scan: the shared rule decides composers too.
+  const isDialogEdge = (line) => isDivider(line) || /^[▔▁]{3,}$/.test(String(line).trim());
   let questionTop = 0;
   for (let i = firstOptionLine - 1; i >= 0; i -= 1) {
-    if (isDivider(lines[i])) { questionTop = i + 1; break; }
+    if (isDialogEdge(lines[i])) { questionTop = i + 1; break; }
   }
   // The tab strip WRAPS in a narrow pane, and a stray fragment of it landing
   // in the question ("riod ✔ Submit →  How should …") is a silent lie about
@@ -464,19 +476,43 @@ function parseMenuScreen(screen) {
     i = end;
   }
   const questionLines = [];
+  let gapSeen = false;
   for (let i = questionTop; i < firstOptionLine; i += 1) {
     const line = lines[i].trim();
-    if (!line || isDivider(line) || isInnerRule(line) || stripLines.has(i)) continue;
+    if (!line) { gapSeen = true; continue; }
+    if (isDivider(line) || isInnerRule(line) || stripLines.has(i)) continue;
     if (isLoneTab(line)) continue;
     questionLines.push({
       text: line,
       indent: lines[i].length - lines[i].trimStart().length,
       lineLength: lines[i].length,
+      // A blank line above, or a line above that asked its own question, starts
+      // a new paragraph (see questionParagraphs).
+      breakBefore: gapSeen || (questionLines.length > 0 && /\?$/.test(questionLines.at(-1).text)),
     });
+    gapSeen = false;
   }
   // Rejoin the question the way the pane broke it, for the same reason the
   // labels need it: a plain space put one back together as "a custo m range".
-  const question = clipped ? '' : joinWrapped(questionLines.slice(-6), paneWidth).slice(0, 320);
+  const shownLines = questionLines.slice(-6);
+  const question = clipped ? '' : joinWrapped(shownLines, paneWidth).slice(0, 320);
+  // The same lines, kept as the paragraphs the CLI drew (2026-10-21). One
+  // string read "Change effort level? Your next response will be slower and
+  // use more tokens This conversation is cached..." as a single bold run on
+  // the phone; a card can show the first paragraph as the title and the rest
+  // as its explanation. `question` stays exactly as it was for every caller.
+  const questionParagraphs = [];
+  if (!clipped) {
+    let current = [];
+    shownLines.forEach((part, index) => {
+      if (index > 0 && part.breakBefore && current.length) {
+        questionParagraphs.push(joinWrapped(current, paneWidth));
+        current = [];
+      }
+      current.push(part);
+    });
+    if (current.length) questionParagraphs.push(joinWrapped(current, paneWidth));
+  }
 
   // What the footer itself advertises, so the card offers exactly the keys
   // this dialog has and invents none. Tab means "switch questions" on a
@@ -521,6 +557,7 @@ function parseMenuScreen(screen) {
 
   return {
     question,
+    questionParagraphs,
     options,
     tabs,
     keys,

@@ -8,8 +8,8 @@
 //
 // A path counts as an artifact when:
 // - a transcript inside the scan window mentions it (Write file_path, a Bash
-//   command, a tool result echoing the output path; the extraction is a raw
-//   regex over each line, so it catches all of those without caring which),
+//   command, a tool result echoing the output path; the extraction scans each
+//   raw line, so it catches all of those without caring which),
 // - it has a viewable extension,
 // - it still exists on disk, and
 // - its mtime is not older than the mentioning session's start: a session that
@@ -51,7 +51,19 @@ const EXT_RE = 'html?|png|jpe?g|gif|webp|svg|pdf|mp4|webm';
 // spaces), a whole JSON string that IS the path (Write's file_path; spaces
 // fine), and a single-quoted path inside a shell command. '.' never occurs in
 // base64, so embedded image payloads can never fake an extension match.
-const BARE_PATH_RE = new RegExp(`(?:\\/[^\\/\\0"'\\\\\\s]+)+\\.(?:${EXT_RE})\\b`, 'gi');
+//
+// THE BARE SHAPE IS TOKENIZED, NOT MATCHED IN ONE REGEX (2026-10-21 audit). It
+// was `(?:\/[^/\0"'\\\s]+)+\.(ext)\b` run over the raw line, and a run of
+// segments with no extension made it rescan the rest of the run from every
+// later '/': quadratic. A 1.3 MB slash-rich base64 image record (one pasted
+// screenshot) held the event loop for 18.5 s and found nothing, freezing
+// harbor-server's sockets and daemon links with it. The same answer comes in
+// linear time: find each maximal '/segment' chain once, then keep it up to its
+// LAST '.ext' (the old greedy match), because a retry from a later '/' inside
+// a chain can only reach extensions the first attempt already saw.
+// test/providers/artifacts.test.js pins both shapes against the old regex.
+const BARE_CHAIN_RE = /(?:\/[^\/\0"'\\\s]+)+/g;
+const EXT_AT_RE = new RegExp(`\\.(?:${EXT_RE})\\b`, 'iy');
 const JSON_STRING_PATH_RE = new RegExp(`"(\\/(?:[^"\\\\]|\\\\.){2,400}?\\.(?:${EXT_RE}))"`, 'gi');
 const QUOTED_PATH_RE = new RegExp(`'(\\/[^']{2,400}?\\.(?:${EXT_RE}))'`, 'gi');
 // The same two shapes for a DRIVE-LETTERED path, which is what Write's
@@ -68,7 +80,9 @@ const QUOTED_PATH_RE = new RegExp(`'(\\/[^']{2,400}?\\.(?:${EXT_RE}))'`, 'gi');
 // quoted form allows spaces because the quotes bound it; the embedded form
 // (a Bash command) does not, for the same reason BARE_PATH_RE does not.
 const WIN_JSON_PATH_RE = new RegExp(`"([A-Za-z]:(?:\\\\\\\\|/)(?:[^"\\\\]|\\\\.){2,400}?\\.(?:${EXT_RE}))"`, 'gi');
-const WIN_BARE_PATH_RE = new RegExp(`[A-Za-z]:(?:\\\\\\\\|/)(?:[^"\\s\\\\]|\\\\\\\\)+?\\.(?:${EXT_RE})\\b`, 'gi');
+// Bounded at 400 like every sibling shape: unbounded, each 'x:/' (every
+// "https://") rescanned to the end of its run, the bare shape's trap again.
+const WIN_BARE_PATH_RE = new RegExp(`[A-Za-z]:(?:\\\\\\\\|/)(?:[^"\\s\\\\]|\\\\\\\\){1,400}?\\.(?:${EXT_RE})\\b`, 'gi');
 // The missing Windows twin of QUOTED_PATH_RE (live-caught 2026-08-30: a
 // session in C:\dev\Surveys\Exit Interviews delivered its PDFs via
 // single-quoted PowerShell paths, and the whole project was invisible in the
@@ -172,10 +186,60 @@ function decodeJsonString(raw) {
   try { return JSON.parse(`"${raw}"`); } catch { return null; }
 }
 
-// All artifact-shaped absolute paths in one transcript line.
-function extractCandidates(line) {
+// The bare POSIX shape, in order, exactly as the old single regex matched it
+// (see BARE_CHAIN_RE). A chain's match ends at its rightmost '.ext' whose '.'
+// follows a segment character, never a '/'.
+function barePaths(text) {
+  const out = [];
+  for (const [chain] of text.matchAll(BARE_CHAIN_RE)) {
+    for (let dot = chain.lastIndexOf('.'); dot > 0; dot = chain.lastIndexOf('.', dot - 1)) {
+      if (chain[dot - 1] === '/') continue;
+      EXT_AT_RE.lastIndex = dot;
+      const ext = EXT_AT_RE.exec(chain);
+      if (ext) { out.push(chain.slice(0, dot + ext[0].length)); break; }
+    }
+  }
+  return out;
+}
+
+// A run this long of nothing but base64 alphabet is a payload (a pasted image,
+// a PDF, a base64 dump), never a path: a real path breaks on '.', '-', '_', a
+// space or a drive colon long before 1 KiB. Blanking it keeps every pattern
+// below off image data entirely; one linear pass, no regex.
+const BLOB_RUN = 1024;
+function isBase64Code(code) {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57)
+    || code === 43 || code === 47 || code === 61;
+}
+function withoutBlobs(line) {
+  if (line.length < BLOB_RUN) return line;
+  let out = '';
+  let kept = 0;
+  let runStart = -1;
+  for (let i = 0; i <= line.length; i += 1) {
+    if (i < line.length && isBase64Code(line.charCodeAt(i))) {
+      if (runStart < 0) runStart = i;
+      continue;
+    }
+    if (runStart >= 0 && i - runStart >= BLOB_RUN) {
+      out += `${line.slice(kept, runStart)} `;
+      kept = i;
+    }
+    runStart = -1;
+  }
+  return kept === 0 ? line : out + line.slice(kept);
+}
+
+// All artifact-shaped absolute paths in one transcript line. The output is the
+// same as before the 2026-10-21 rework for every real path (the bare shape is
+// an exact rewrite; only a 1 KiB extensionless base64-alphabet run or a
+// 400-character Windows path differ), so the candidate cache stays valid and
+// CACHE_VERSION is deliberately not bumped: a bump would re-parse 14 days of
+// transcripts to reproduce the answer already cached.
+function extractCandidates(rawLine) {
+  const line = withoutBlobs(rawLine);
   const found = new Set();
-  for (const match of line.matchAll(BARE_PATH_RE)) found.add(match[0]);
+  for (const candidate of barePaths(line)) found.add(candidate);
   for (const match of line.matchAll(JSON_STRING_PATH_RE)) {
     const decoded = decodeJsonString(match[1]);
     if (decoded && decoded.startsWith('/')) found.add(decoded);
@@ -284,6 +348,8 @@ function createArtifactsProvider(options = {}) {
   // shell commands). The cache is keyed by transcript size+mtime, so without
   // this bump the new shapes would apply only to sessions written after they
   // shipped and the fix would look inert on exactly the history being viewed.
+  // (2026-10-21: the linear rewrite kept the output, so no bump; see
+  // extractCandidates.)
   const CACHE_VERSION = 3;
   let cache = { version: CACHE_VERSION, files: {} };
   try {
@@ -466,6 +532,7 @@ module.exports = {
   createArtifactsProvider,
   createServeAllowlist,
   extractCandidates,
+  barePaths,
   artifactKind,
   isExcluded,
   WINDOW_DAYS,

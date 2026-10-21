@@ -883,6 +883,35 @@ test('refcounted open/close', async () => {
   await fsp.rm(dir, { recursive: true, force: true });
 });
 
+// Second Sol review (2026-10-21): two opens overlapping the metadata lookup each
+// built an entry; the later overwrote the map and the earlier one's watcher ran
+// on with nothing able to close it.
+test('overlapping opens share one entry, and two closes leave no watcher behind', async () => {
+  const dir = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-transcript-'));
+  const file = path.join(dir, 's.jsonl');
+  writeLines(file, [userLine('x')], 'w');
+  let watchers = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const provider = createTranscriptProvider({
+    getSessionMeta: async () => { await gate; return { path: file }; },
+    watchFactory: () => { watchers += 1; return { on: () => {}, close: () => { watchers -= 1; } }; },
+  });
+  const first = provider.open('s');
+  const second = provider.open('s');
+  release();
+  assert.deepEqual([(await first).ok, (await second).ok], [true, true]);
+  assert.equal(provider.openCount(), 1, 'one entry for one session');
+  assert.equal(watchers, 1, 'one watcher for one session');
+  provider.close('s');
+  assert.equal(provider.openCount(), 1, 'the second holder keeps it open');
+  provider.close('s');
+  assert.equal(provider.openCount(), 0);
+  assert.equal(watchers, 0, 'nothing left watching');
+  provider.closeAll();
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
 // 2026-09-05, "harbor will crash / restart and nothing will load... i have to
 // close it and reopen it". A memory-pressure renderer crash reloads the window;
 // index.js drops main's stranded transcript refcounts so the restored page can
@@ -1014,6 +1043,68 @@ test('provider recovers an image before the initial tail window without parsing 
   const final = updates.slice(1).reduce(applyTranscriptUpdate, initial);
   assert.ok(final.some((block) => block.text === 'new live tail'));
   assert.equal(final.find((block) => block.images?.length), initial.find((block) => block.images?.length));
+  provider.closeAll();
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+// A TOKEN TICK MUST NOT RESEND THE PROMPT'S IMAGE (2026-10-21 audit). Every
+// assistant usage record re-marks the prompt that opened the turn, and a whole
+// changed block carries its base64 images: the audit measured a 130,000 byte
+// image prompt plus twelve tiny replies at about 1.57 MB of phone traffic.
+test('a turn-token update on an image prompt is a small patch, and the held image survives it', async () => {
+  const dir = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-transcript-'));
+  const file = path.join(dir, 'image-prompt.jsonl');
+  const image = 'A'.repeat(130_000);
+  writeLines(file, [userLine([{ type: 'text', text: 'Explain this image' }, imagePart('image/png', image)],
+    { timestamp: '2026-10-21T12:00:00.000Z' })], 'w');
+  const provider = createTranscriptProvider({
+    getSessionMeta: async () => ({ path: file }),
+    watchFactory: () => ({ on() {}, close() {} }),
+  });
+  const updates = [];
+  provider.emitter.on('update', (u) => updates.push(JSON.parse(JSON.stringify(u))));
+  await provider.open('image-prompt', { window: { blocks: 60 } });
+  const initial = updates[0].replace;
+  const prompt = initial.find((block) => block.kind === 'user');
+  assert.equal(prompt.images.length, 1);
+  updates.length = 0;
+
+  for (let i = 0; i < 12; i += 1) {
+    writeLines(file, [assistantLine([{ type: 'text', text: `Reply ${i}` }],
+      { usage: { output_tokens: 10 }, timestamp: `2026-10-21T12:00:${String(10 + i).padStart(2, '0')}.000Z` })]);
+    await provider.refresh('image-prompt');
+  }
+  assert.equal(updates.length, 12);
+  for (const update of updates) {
+    assert.equal(update.replace, undefined);
+    assert.equal((update.changed || []).some((block) => block.key === prompt.key), false, 'the prompt must not travel whole');
+    const patch = update.patched.find((block) => block.key === prompt.key);
+    assert.ok(patch, 'the prompt\'s new token total travels as a patch');
+    assert.equal(patch.images, undefined, 'and the patch carries no image');
+    const bytes = Buffer.byteLength(JSON.stringify({ type: 'push', channel: 'transcript:update', args: [update] }));
+    assert.ok(bytes < image.length / 20, `a token tick cost ${bytes} bytes against a ${image.length} byte image`);
+  }
+
+  const { applyTranscriptUpdate } = require('../../src/shared/transcript-blocks.cjs');
+  const final = updates.reduce(applyTranscriptUpdate, initial);
+  const held = final.find((block) => block.key === prompt.key);
+  assert.equal(held.images, prompt.images, 'the reducer keeps the image it already holds');
+  assert.deepEqual(held.turnMeta, { outputTokens: 120, durationMs: 21_000 });
+  assert.equal(final.filter((block) => block.kind === 'assistant').length, 12);
+
+  // A usage record that moves neither number sends no prompt change at all:
+  // one API message is written as several lines repeating its id and usage.
+  updates.length = 0;
+  const repeat = assistantLine([], { usage: { output_tokens: 10 }, timestamp: '2026-10-21T12:00:22.000Z' });
+  repeat.message.id = 'msg-same';
+  writeLines(file, [repeat]);
+  await provider.refresh('image-prompt');
+  writeLines(file, [repeat]);
+  await provider.refresh('image-prompt');
+  assert.equal(updates.length, 2);
+  assert.equal(updates[0].patched[0].turnMeta.outputTokens, 130, 'control: a real change still patches');
+  assert.equal(updates[1].patched, undefined, 'an unchanged total re-sends nothing');
+
   provider.closeAll();
   await fsp.rm(dir, { recursive: true, force: true });
 });

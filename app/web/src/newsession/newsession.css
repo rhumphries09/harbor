@@ -294,7 +294,7 @@
 
 .newsession-provider,
 .newsession-effort {
-  min-height: 40px;
+  min-height: var(--touch-min);
   padding: 8px 14px;
   border: 1px solid var(--ln);
   border-radius: 999px;
@@ -320,6 +320,14 @@
 .newsession-start {
   width: 100%;
   min-height: 48px;
+}
+
+/* A start that cannot start looks it (2026-10-21 review: full-strength blue
+   with no folder to start in). */
+.newsession-start:disabled {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fnt);
+  cursor: default;
 }
 
 /* Names the chosen folder, which may sit in a closed group or be filtered out

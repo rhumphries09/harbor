@@ -64,23 +64,40 @@ function useClock(ms) {
   return now;
 }
 
-export function SessionMeta({ client, session, header, pane }) {
+// One computation for both places the facts are drawn (2026-10-21): the status
+// rides on the header's project line ("CDT-APP · Waiting on you"), where it has
+// room and is never cut to "Waiti…", and context and cache sit in the strip.
+// One hook, so the work-meter poll still runs once.
+export function useSessionFacts({ client, session, header, pane, background = null }) {
   const now = useClock(15000);
   const meter = useWorkMeter(client, session, pane, Boolean(header?.working), header?.lastPrompt || null);
   if (!session) return null;
   const context = contextFact(header) || (typeof session.contextPct === 'number' ? contextFact({ contextPct: session.contextPct }) : null);
-  const status = statusFact({ session, header, meter, now });
+  // Background work ("7 tasks running") is what the session is doing while its
+  // turn is over, so it IS the status; it used to take a row of its own.
+  const status = background && !header?.working && !header?.blocked
+    ? { kind: 'background', label: background }
+    : statusFact({ session, header, meter, now });
   const cache = describeCacheFreshness(cacheFreshness({ touchedMs: header?.cacheTouchedMs, ttlMs: header?.cacheTtlMs, now }));
+  return { context, status, cache };
+}
+
+export function SessionStatus({ facts }) {
+  if (!facts?.status) return null;
+  return <span className={`hdr-status hdr-status-${facts.status.kind}`}>{facts.status.label}</span>;
+}
+
+export function SessionMeta({ facts }) {
+  if (!facts) return null;
+  const { context, cache } = facts;
   return (
     <div className="hdr-meta" role="group" aria-label="Session details">
       {context ? (
         <span className={`hdr-ctx hdr-ctx-${context.kind}${context.warn ? ' warn' : ''}`} title={context.title} aria-label={context.title}>
           {context.kind === 'pct' ? <span className="hdr-ring" style={{ '--pct': `${context.pct}%` }} aria-hidden="true" /> : null}
           <span className="hdr-ctx-num">{context.label}</span>
-          <span className="hdr-ctx-unit">context</span>
         </span>
       ) : null}
-      <span className={`hdr-status hdr-status-${status.kind}`}>{status.label}</span>
       {cache ? <span className={`hdr-cache cache-${cache.state}`} title={cache.title}>{cache.label}</span> : null}
     </div>
   );
