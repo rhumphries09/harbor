@@ -600,6 +600,20 @@ button { font-family: inherit; }
   font-size: 10px;
 }
 
+/* Seven or more (five Claude plans and three codex plans since 2026-10-21):
+   one step tighter, and the head's own gaps and eyebrow tracking with it. At
+   eight, the compact row needed a 302px rail and hung "+W" past Pat's (278px:
+   his window runs at 120% zoom). Measured in an isolated Harbor
+   (scripts/drive-plan-surfaces-win.js): this row fits from 266px. The default
+   rail for that many profiles is 340px (railWidthForProfileCount). */
+.rail-head:has(.rail-new-split[data-crowded]) { gap: 4px; }
+.rail-head:has(.rail-new-split[data-crowded]) .rail-eyebrow { letter-spacing: 0.08em; }
+.rail-new-split[data-crowded] { gap: 2px; }
+.rail-new-split[data-crowded] .sidebar-global-new,
+.sidebar-project-actions[data-crowded] .sidebar-proj-new {
+  padding: 0 3px;
+}
+
 .rail-setup-hint,
 .rail-setup-banner {
   font: 500 10px var(--font-ui);

@@ -85,6 +85,10 @@ test('rail width scales with profile count without shrinking the three-profile c
   assert.equal(railWidthForProfileCount(1), 260);
   assert.equal(railWidthForProfileCount(3), 292);
   assert.equal(railWidthForProfileCount(5), 320);
+  assert.equal(railWidthForProfileCount(6), 320);
+  // Eight launch buttons (five Claude plans, three codex) need the wider default.
+  assert.equal(railWidthForProfileCount(7), 340);
+  assert.equal(railWidthForProfileCount(8), 340);
 });
 
 test('renderer sources no longer hardcode the lab account id', () => {

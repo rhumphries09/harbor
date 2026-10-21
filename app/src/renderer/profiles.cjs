@@ -85,7 +85,10 @@ function launchDefaults(options) {
 function railWidthForProfileCount(count) {
   if (count <= 1) return 260;
   if (count <= 3) return 292;
-  return 320;
+  if (count <= 6) return 320;
+  // Seven or more launch buttons share the rail head even at their tightest
+  // ([data-crowded] in styles.css); 340 keeps eight on one line with room to spare.
+  return 340;
 }
 
 module.exports = {

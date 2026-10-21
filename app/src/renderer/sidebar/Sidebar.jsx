@@ -728,8 +728,12 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
   }, [profiles]);
 
   // Four or more profiles share the rail head and a hovered project row, so the
-  // buttons go compact (CSS [data-dense]) and drop the space in "+ P".
+  // buttons go compact (CSS [data-dense]) and drop the space in "+ P". Seven or
+  // more (five Claude plans and three codex plans since 2026-10-21) tighten once
+  // more (CSS [data-crowded]): at eight, the compact row needed a 302px rail and
+  // hung "+W" past Pat's 278px one.
   const denseLaunch = profiles.length >= 4;
+  const crowdedLaunch = profiles.length >= 7;
   const renderProfileLaunchButtons = (className, { folder, sessionId, immediate = false } = {}) => (
     profiles.map((profile) => (
       <button
@@ -852,7 +856,7 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
             </span>
           </button>
           {!project.isDateGroup && !project.isWindowsEra && newSessionFolder && profiles.length > 0 ? (
-            <div className="sidebar-project-actions" data-profile-count={profiles.length} data-dense={denseLaunch ? 'true' : undefined}>
+            <div className="sidebar-project-actions" data-profile-count={profiles.length} data-dense={denseLaunch ? 'true' : undefined} data-crowded={crowdedLaunch ? 'true' : undefined}>
               {renderProfileLaunchButtons('sidebar-proj-new', {
                 folder: newSessionFolder,
                 sessionId: newSessionId,
@@ -946,7 +950,7 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
         </span>
         <div className="rail-head-actions">
           {profiles.length > 0 ? (
-            <div className="rail-new-split" data-profile-count={profiles.length} data-dense={denseLaunch ? 'true' : undefined}>
+            <div className="rail-new-split" data-profile-count={profiles.length} data-dense={denseLaunch ? 'true' : undefined} data-crowded={crowdedLaunch ? 'true' : undefined}>
               {renderProfileLaunchButtons('sidebar-global-new')}
             </div>
           ) : profilesLoaded ? (
