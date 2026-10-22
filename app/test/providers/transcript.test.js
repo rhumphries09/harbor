@@ -410,6 +410,38 @@ test('trim never drops user turns to keep images or tool blocks', () => {
   assert.ok(users.some((b) => b.text === 'keep me'), 'the user turn survived the trim');
 });
 
+const peerMessage = (from, body) => `<cross-session-message from="uds:\\\\.\\pipe\\LOCAL\\cc-msg-${from}" from-name="${from}" from-mode="bypass">\n${body}\n</cross-session-message>`;
+
+test('a queued cross-session message renders flagged as a peer message; Pat\'s own queued text is not', () => {
+  const p = new TranscriptParser();
+  p.applyLine(enqueueLine(peerMessage('cdt-app-80', 'grade landed')));
+  p.applyLine(enqueueLine('keep going'));
+  assert.equal(p.blocks.length, 2);
+  assert.equal(p.blocks[0].kind, 'user');
+  assert.equal(p.blocks[0].queued, true);
+  assert.equal(p.blocks[0].peer, true);
+  assert.equal(p.blocks[1].peer, undefined, 'a typed message carries no peer flag');
+});
+
+test('peer messages past the cap never evict every agent row (2026-10-22 lead window)', () => {
+  // The live shape: a lead session messaged all night by other sessions,
+  // with its own work between the messages. Before the fix the peer bubbles
+  // were protected as user turns and the window held 240 of them, no agent rows.
+  const p = new TranscriptParser();
+  p.applyLine(userLine('run the window'));
+  for (let i = 0; i < MAX_BLOCKS + 60; i += 1) {
+    p.applyLine(enqueueLine(peerMessage('cdt-app-d4', `status ${i}`)));
+    p.applyLine(assistantLine([{ type: 'text', text: `ruling ${i}` }]));
+  }
+  assert.equal(p.blocks.length, MAX_BLOCKS);
+  const agentRows = p.blocks.filter((b) => b.kind === 'assistant');
+  const peerRows = p.blocks.filter((b) => b.peer);
+  assert.ok(agentRows.length >= MAX_BLOCKS / 2 - 1, `agent rows kept their share (${agentRows.length})`);
+  assert.ok(peerRows.length >= MAX_BLOCKS / 2 - 1, `peer rows kept their share (${peerRows.length})`);
+  assert.equal(p.blocks.at(-1).text, `ruling ${MAX_BLOCKS + 59}`, 'the newest agent row is on screen');
+  assert.ok(p.blocks.some((b) => b.kind === 'user' && !b.peer && b.text === 'run the window'), 'Pat\'s own turn is still protected');
+});
+
 test('the live path caps retained image blocks at MAX_IMAGE_BLOCKS (base64 is the OOM payload)', () => {
   const p = new TranscriptParser();
   // Push many more image-bearing blocks than the cap, interleaved with text so

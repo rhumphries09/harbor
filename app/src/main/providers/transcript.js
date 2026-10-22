@@ -519,6 +519,14 @@ function normalizeQueuedKey(text) {
   return String(text ?? '').replace(/\s+/g, ' ').trim();
 }
 
+// A message another Claude session sent (cross-session messaging) is written
+// as a queued user message, wrapped in <cross-session-message ...>. It renders
+// as a bubble like any other, but Pat did not type it, so it carries `peer` and
+// gets none of the trim protection his own turns get (see push()).
+function isPeerMessage(raw) {
+  return /^<cross-session-message[\s>]/.test(String(raw ?? '').trim());
+}
+
 function userTextFor(raw) {
   const text = String(raw ?? '').trim();
   if (!text) return null;
@@ -660,7 +668,15 @@ class TranscriptParser {
       // keep screenshots (live-caught: follow-up messages vanishing) while still
       // preserving early inline images in a long transcript. Drop the oldest
       // block in the lowest-priority tier that still exists.
-      let dropIndex = this.blocks.findIndex((item) => item.kind !== 'user' && !item.images?.length);
+      //
+      // A PEER MESSAGE IS NOT PAT'S OWN TURN (2026-10-22, Pat: "i only see
+      // cross section messages to it and dont see any agent turns"). A lead
+      // session that other sessions message all night received 227 of them;
+      // protected as user turns they filled all 240 slots and every agent row
+      // was evicted the moment it arrived, while the `>_` terminal showed the
+      // work. Peer blocks share the bottom tier with agent rows, so the window
+      // stays a time-ordered slice of both.
+      let dropIndex = this.blocks.findIndex((item) => (item.kind !== 'user' || item.peer) && !item.images?.length);
       if (dropIndex < 0) dropIndex = this.blocks.findIndex((item) => item.kind === 'user' && !item.images?.length);
       if (dropIndex < 0) dropIndex = 0; // only image-bearing blocks remain
       const [dropped] = this.blocks.splice(dropIndex, 1);
@@ -773,7 +789,7 @@ class TranscriptParser {
         }
         const user = userTextFor(content);
         if (user) {
-          this.startTurn(this.push({ kind: 'user', text: user.text, command: user.command, ts }), ts);
+          this.startTurn(this.push({ kind: 'user', text: user.text, command: user.command, ts, ...(isPeerMessage(content) ? { peer: true } : {}) }), ts);
           this.header.lastSignal = turnSignal(obj) === 'idle' ? 'idle' : 'user-turn';
         }
         return changed;
@@ -791,7 +807,7 @@ class TranscriptParser {
             }
             const user = userTextFor(part.text);
             if (user) {
-              lastUserInLine = this.push({ kind: 'user', text: user.text, command: user.command, ts });
+              lastUserInLine = this.push({ kind: 'user', text: user.text, command: user.command, ts, ...(isPeerMessage(part.text) ? { peer: true } : {}) });
               this.startTurn(lastUserInLine, ts);
               this.header.lastSignal = turnSignal(obj) === 'idle' ? 'idle' : 'user-turn';
             }
@@ -837,7 +853,7 @@ class TranscriptParser {
     if (obj.type === 'queue-operation' && obj.operation === 'enqueue') {
       const user = userTextFor(obj.content);
       if (user) {
-        const block = this.push({ kind: 'user', text: user.text, command: user.command, ts, queued: true });
+        const block = this.push({ kind: 'user', text: user.text, command: user.command, ts, queued: true, ...(isPeerMessage(obj.content) ? { peer: true } : {}) });
         this.queuedByText.set(normalizeQueuedKey(user.text), block);
         this.header.lastSignal = 'user-turn';
       }
