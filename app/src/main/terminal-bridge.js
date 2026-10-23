@@ -9,6 +9,31 @@ const {
 
 const BACKFILL_LINES = 200;
 
+// A FULLSCREEN CLAUDE KEEPS ITS OWN SCROLL POSITION, SO A >_ PEEK MUST NOT
+// LEAVE IT SCROLLED AWAY (2026-10-22, a stale >_ view over a correct
+// conversation view). Claude Code's fullscreen renderer ("tui": "fullscreen",
+// and the default for a fresh install) draws on the alternate screen, turns on
+// mouse reporting, and owns a virtual scrollback: a wheel or Page Up in the >_
+// view scrolls the CLI itself, which stops following new output. That position
+// is CLI state, not view state. It outlives the view, the CLI re-follows only
+// when a TYPED prompt lands (a background task's turn does not), and Harbor's
+// own pty resizes (the dialog size on focus, the view's fit on open) can hide
+// the CLI's "N new messages" pill. So a scroll during a three-second peek can
+// park a session's terminal for good: in the incident one sat on its last
+// typed prompt for over an hour, with no pill, while the conversation view,
+// read from the transcript, moved on. The daemon's modeled screen and the
+// view both agreed with the CLI; the CLI was simply not at its bottom.
+// Harbor's >_ view promised what an inline terminal gives for free: it opens
+// on the live output, and scrolling inside it is the view's own business.
+// For a claude pane that promise is now kept with the CLI's own
+// "Jump to bottom" key (ctrl+End, the key its pill names), sent when the view
+// opens and again when it closes. Measured on CLI 2.1.303: it re-follows a
+// scrolled fullscreen view, is a no-op at the bottom, leaves a draft and its
+// cursor alone, does nothing in the /model picker, and does nothing in the
+// classic inline renderer. Codex and cursor panes are never sent it.
+const LIVE_BOTTOM_KEY = '\x1b[1;5F';
+const LIVE_BOTTOM_AGENTS = new Set(['claude']);
+
 function layoutsToMap(layouts) {
   const map = {};
   for (const layout of layouts || []) map[layout.tab_id] = layout;
@@ -196,7 +221,9 @@ function createTerminalBridge(options = {}) {
       // reset, not detach: detach also stops listening, which left every
       // re-attached pane frozen (streams.js reset).
       supervisor.reset();
-      await applyVisiblePanes(panes);
+      // A re-attach is not an open: a human reading a scrolled view keeps
+      // their place across a daemon reconnect.
+      await applyVisiblePanes(panes, { reattach: true });
       emitter.emit('connection-restored');
     } catch {
       scheduleReconnect();
@@ -332,7 +359,37 @@ function createTerminalBridge(options = {}) {
     return visiblePanesChain;
   };
 
-  const applyVisiblePanes = async (panes = []) => {
+  // The agent the daemon recorded for a pane (claude, codex, cursor), read off
+  // the snapshot this bridge already holds; null when the pane is unknown.
+  const paneAgent = (paneId) => {
+    for (const layout of Object.values(state.layouts || {})) {
+      const pane = layout?.panes?.find((item) => item.pane_id === paneId);
+      if (pane) return pane.agent ?? null;
+    }
+    return null;
+  };
+
+  // See LIVE_BOTTOM_KEY. Written straight to the daemon rather than through
+  // sendInput: it belongs to no one's control, and the view that just closed
+  // has given control up. A send in flight owns the pane, and its own typed
+  // submit re-follows anyway, so it is left alone. A pane that already exited
+  // has nothing to re-follow.
+  // Never while another controller owns the pane (an adversarial review on
+  // 2026-10-22 found the close-time key ignored external control), and the
+  // lease is checked last, immediately before the write, so a send that took
+  // the pane meanwhile keeps it. The key itself leaves a draft untouched
+  // (measured), so the remaining gap cannot corrupt typed text.
+  const returnToLiveBottom = async (paneId) => {
+    if (closed || !client?.sendInput) return;
+    if (!LIVE_BOTTOM_AGENTS.has(paneAgent(paneId))) return;
+    if (externalControl.has(paneId)) return;
+    if (controlHolds.get(paneId)) return;
+    try {
+      await client.sendInput(paneId, { text: LIVE_BOTTOM_KEY });
+    } catch { /* the session ended; there is no screen left to re-follow */ }
+  };
+
+  const applyVisiblePanes = async (panes = [], { reattach = false } = {}) => {
     const next = new Map();
     for (const pane of panes) {
       if (!pane?.paneId) continue;
@@ -345,17 +402,37 @@ function createTerminalBridge(options = {}) {
     for (const paneId of visiblePanes.keys()) {
       if (!next.has(paneId)) {
         if (controlledPaneId === paneId) {
-          supervisor.releaseControl(paneId);
-          controlledPaneId = null;
+          // A send in flight leases control (see controlHolds): closing the view
+          // must not revoke it mid-send any more than a blur may (adversarial
+          // review, 2026-10-22: the send's next keystroke failed "pane is not
+          // focused for control"). The release waits for the last lease.
+          if (controlHolds.get(paneId)) pendingBlur.add(paneId);
+          else {
+            supervisor.releaseControl(paneId);
+            controlledPaneId = null;
+          }
         }
         supervisor.detach(paneId);
+        // The view closed: whatever was scrolled inside it must not keep the
+        // session's own screen parked (Harbor's pane readers, the window's
+        // live work meter among them, read that screen's bottom rows). Not
+        // awaited: a closing view never holds up the next one's attach.
+        returnToLiveBottom(paneId);
       }
     }
 
     for (const [paneId, size] of next) {
       if (!visiblePanes.has(paneId)) {
         holdFrames(paneId);
-        supervisor.attachObserver(paneId, size);
+        const observer = supervisor.attachObserver(paneId, size);
+        if (!reattach) {
+          // The view opens on the live output, not wherever an earlier peek
+          // left the CLI. Only once the relay is up, so the CLI's repaint
+          // reaches this view as frames (held until the backfill lands); a
+          // relay that failed to come up gets no key (review, 2026-10-22).
+          const relayUp = await observer?.ready;
+          if (relayUp !== false) await returnToLiveBottom(paneId);
+        }
         await backfillPane(paneId);
         releaseFrames(paneId);
       } else {

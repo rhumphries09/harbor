@@ -39,9 +39,13 @@ class SessionStreamSupervisor extends EventEmitter {
     if (this.observers.has(paneId)) return this.observers.get(paneId);
     const entry = { paneId };
     this.observers.set(paneId, entry);
-    this.client.request('observe', { id: paneId }).then(
-      () => this.emit('observer-attached', { paneId }),
-      (error) => this.emit('error', Object.assign(error, { paneId, source: 'observe' })),
+    // `ready` settles once the daemon's relay is up (its observe reply comes
+    // after the keeper registered the observer), true or false and never a
+    // rejection, so a caller can wait for "frames will reach me" before it
+    // makes the pane repaint (terminal-bridge's return to the live bottom).
+    entry.ready = this.client.request('observe', { id: paneId }).then(
+      () => { this.emit('observer-attached', { paneId }); return true; },
+      (error) => { this.emit('error', Object.assign(error, { paneId, source: 'observe' })); return false; },
     );
     return entry;
   }
